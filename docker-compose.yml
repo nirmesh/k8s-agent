@@ -1,0 +1,37 @@
+services:
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  backend:
+    build: ./backend
+    network_mode: host
+    env_file:
+      - ./backend/.env
+    environment:
+      - MONGODB_URL=mongodb://localhost:27017
+      - OLLAMA_HOST=http://localhost:11434
+      - OLLAMA_MODEL=llama3:latest
+      - KUBECONFIG=/root/.kube/config
+      - KUBECONFIG_PATH=/root/.kube/config
+    depends_on:
+      - mongo
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - API_PROXY_URL=http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - backend
+
+volumes:
+  mongo_data:
