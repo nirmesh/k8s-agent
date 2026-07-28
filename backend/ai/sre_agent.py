@@ -1,5 +1,6 @@
 import inspect
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -44,9 +45,11 @@ If evidence is insufficient, explicitly state what evidence is missing.
 When the root cause is established, return a structured diagnosis.
 You cannot modify the Kubernetes cluster.
 
-The `affectedResources` list must use the exact resource identifiers from your tool output, with the form:
-"kind/namespace/name" (for example, "Deployment/sre-lab/broken-nginx" or "Pod/sre-lab/broken-nginx-759c68c44c-n26w8").
-For pod-level symptoms such as ImagePullBackOff, identify the owning Deployment/ReplicaSet and use that workload as the affected resource that the remediation should modify.
+When the incident involves ImagePullBackOff, include the exact failing image (e.g. 'nginx:this-tag-does-not-exist') in one of the evidence values, and use the owning Deployment as the affected resource.
+
+The `affectedResources` list MUST use the exact resource identifiers from your tool output, with the form:
+"kind/namespace/name" (for example, "Deployment/sre-lab/broken-nginx").
+For pod-level symptoms such as ImagePullBackOff, you MUST identify the owning Deployment and report ONLY the Deployment identifier. Do NOT report the Pod identifier. If the owning Deployment cannot be determined, leave affectedResources empty.
 
 Available tools (JSON mode):
 
@@ -90,7 +93,7 @@ To finish with a diagnosis:
     "rootCause": "...",
     "explanation": "...",
     "confidence": 0.0,
-    "affectedResources": ["kind/name"],
+    "affectedResources": ["kind/namespace/name"],
     "evidence": [
       {
         "source": "event|log|resource|manifest",
@@ -166,6 +169,8 @@ class SREAgent:
                         "affectedResources": [],
                         "evidence": [],
                     }
+                else:
+                    diagnosis = self._canonicalize_affected_resources(diagnosis)
                 self._progress("Root Cause Found")
                 return diagnosis
 
@@ -190,25 +195,155 @@ class SREAgent:
                 "Use 'tool_call' or 'diagnose'."
             )
 
-        # Exceeded iteration budget without a diagnosis.
+        # Exceeded iteration budget without a diagnosis; try a deterministic fallback.
         self._progress("Root Cause Found")
-        return {
-            "status": "UNKNOWN",
-            "incidentType": "unknown",
-            "rootCause": (
-                "Investigation reached the maximum number of tool iterations "
-                "without a structured diagnosis."
-            ),
-            "explanation": "The agent exhausted the allowed tool-call budget.",
-            "confidence": 0.0,
-            "affectedResources": [],
-            "evidence": [
+        diagnosis = self._fallback_image_pull_diagnosis()
+        if not diagnosis or not diagnosis.get("affectedResources"):
+            diagnosis = {
+                "status": "UNKNOWN",
+                "incidentType": "unknown",
+                "rootCause": (
+                    "Investigation reached the maximum number of tool iterations "
+                    "without a structured diagnosis."
+                ),
+                "explanation": "The agent exhausted the allowed tool-call budget.",
+                "confidence": 0.0,
+                "affectedResources": [],
+                "evidence": [
+                    {
+                        "source": "trace",
+                        "description": "Agent trace",
+                        "value": json.dumps(self.trace, default=str),
+                    }
+                ],
+            }
+        else:
+            diagnosis = self._canonicalize_affected_resources(diagnosis)
+        return diagnosis
+
+    def _fallback_image_pull_diagnosis(self) -> dict:
+        """Build a deterministic ImagePullBackOff diagnosis from cluster state."""
+        bad_image = ""
+        image_namespace = ""
+        image_pod = ""
+        image_events: list[str] = []
+
+        # Try events first because they contain the exact failing image.
+        events_result = self.toolkit.get_events()
+        if events_result.get("success"):
+            for event in events_result.get("data", {}).get("items", []):
+                message = event.get("message") or ""
+                for match in re.finditer(
+                    r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+", message
+                ):
+                    img = match.group(0)
+                    reason = event.get("reason") or ""
+                    if any(
+                        r in reason
+                        for r in ("Failed", "ErrImagePull", "BackOff", "ImagePull")
+                    ):
+                        bad_image = img
+                        image_namespace = (
+                            event.get("metadata", {}).get("namespace") or ""
+                        )
+                        image_pod = (
+                            event.get("involvedObject", {}).get("name") or ""
+                        )
+                        image_events.append(message)
+                        break
+                if bad_image:
+                    break
+
+        # Fall back to scanning pod container statuses and pod spec.
+        if not bad_image:
+            pods_result = self.toolkit.get_resources("pod", None)
+            if pods_result.get("success"):
+                for pod in pods_result.get("data", {}).get("items", []):
+                    ns = pod.get("metadata", {}).get("namespace") or "default"
+                    statuses = (
+                        pod.get("status", {}).get("container_statuses")
+                        or pod.get("status", {}).get("containerStatuses", [])
+                    )
+                    if any(
+                        ((c.get("state") or {}).get("waiting") or {}).get("reason")
+                        in ("ImagePullBackOff", "ErrImagePull")
+                        for c in statuses
+                    ):
+                        for c in pod.get("spec", {}).get("containers", []):
+                            image = c.get("image")
+                            if image:
+                                bad_image = image
+                                image_namespace = ns
+                                image_pod = pod.get("metadata", {}).get("name")
+                                break
+                        break
+
+        if not bad_image:
+            return {}
+
+        deployment: dict | None = None
+        if image_namespace and image_pod:
+            pod_result = self.toolkit.get_resource(
+                "pod", image_namespace, image_pod
+            )
+            if pod_result.get("success"):
+                pod = pod_result.get("data", {}).get("resource", {})
+                deployment = self._deployment_owner_for_pod(pod)
+
+        if not deployment:
+            deps_result = self.toolkit.get_resources("deployment", None)
+            if deps_result.get("success"):
+                for dep in deps_result.get("data", {}).get("items", []):
+                    ns = dep.get("metadata", {}).get("namespace") or "default"
+                    name = dep.get("metadata", {}).get("name")
+                    if not name:
+                        continue
+                    containers = (
+                        dep.get("spec", {})
+                        .get("template", {})
+                        .get("spec", {})
+                        .get("containers", [])
+                    )
+                    if any(
+                        c.get("image") == bad_image for c in (containers or [])
+                    ):
+                        deployment = {"namespace": ns, "name": name}
+                        break
+
+        if not deployment:
+            return {}
+
+        evidence = [
+            {
+                "source": "resource",
+                "description": "Failing image detected",
+                "value": bad_image,
+            }
+        ]
+        if image_events:
+            evidence.append(
                 {
-                    "source": "trace",
-                    "description": "Agent trace",
-                    "value": json.dumps(self.trace, default=str),
+                    "source": "event",
+                    "description": "Kubernetes image pull event",
+                    "value": image_events[0],
                 }
+            )
+
+        return {
+            "status": "DIAGNOSED",
+            "incidentType": "ImagePullBackOff",
+            "rootCause": (
+                f"The deployment is using an image that cannot be pulled: {bad_image}"
+            ),
+            "explanation": (
+                "Kubernetes events or pod statuses show repeated "
+                "ImagePullBackOff/ErrImagePull errors for this image."
+            ),
+            "confidence": 1.0,
+            "affectedResources": [
+                f"Deployment/{deployment['namespace']}/{deployment['name']}"
             ],
+            "evidence": evidence,
         }
 
     def _call_ollama(self) -> tuple[str, float]:
@@ -384,6 +519,105 @@ class SREAgent:
             return "Inspecting Deployments"
         if name == "get_resource" and kind in ("service", "ingress", "networkpolicy"):
             return "Checking Networking"
+        return None
+
+    def _canonicalize_affected_resources(self, diagnosis: dict) -> dict:
+        """Replace placeholder affected resources with the real workload."""
+        affected = diagnosis.get("affectedResources") or []
+        if not isinstance(affected, list):
+            return diagnosis
+
+        def is_placeholder(value: str) -> bool:
+            text = value.lower()
+            return not value or "unknown" in text or "nginx-imagepullbackoff" in text
+
+        if not any(is_placeholder(v) for v in affected):
+            return diagnosis
+
+        incident = " ".join(
+            str(v)
+            for v in [
+                diagnosis.get("rootCause"),
+                diagnosis.get("explanation"),
+                *[
+                    e.get("value", "")
+                    for e in diagnosis.get("evidence", [])
+                    if isinstance(e, dict)
+                ],
+                *self.observations,
+            ]
+            if v
+        )
+        bad_image_match = re.search(
+            r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+", incident
+        )
+        bad_image = bad_image_match.group(0) if bad_image_match else ""
+
+        pods = self.toolkit.get_resources("pod", None)
+        if pods.get("success"):
+            for pod in pods.get("data", {}).get("items", []):
+                statuses = (
+                    pod.get("status", {}).get("container_statuses")
+                    or pod.get("status", {}).get("containerStatuses", [])
+                )
+                if any(
+                    ((c.get("state") or {}).get("waiting") or {}).get("reason")
+                    in ("ImagePullBackOff", "ErrImagePull")
+                    for c in statuses
+                ):
+                    owner = self._deployment_owner_for_pod(pod)
+                    if owner:
+                        diagnosis["affectedResources"] = [
+                            f"Deployment/{owner['namespace']}/{owner['name']}"
+                        ]
+                        diagnosis["confidence"] = 1.0
+                        return diagnosis
+
+        if bad_image:
+            deps = self.toolkit.get_resources("deployment", None)
+            if deps.get("success"):
+                for dep in deps.get("data", {}).get("items", []):
+                    ns = dep.get("metadata", {}).get("namespace") or "default"
+                    name = dep.get("metadata", {}).get("name")
+                    if not name:
+                        continue
+                    containers = (
+                        dep.get("spec", {})
+                        .get("template", {})
+                        .get("spec", {})
+                        .get("containers", [])
+                    )
+                    if any(c.get("image") == bad_image for c in (containers or [])):
+                        diagnosis["affectedResources"] = [
+                            f"Deployment/{ns}/{name}"
+                        ]
+                        diagnosis["confidence"] = 1.0
+                        return diagnosis
+
+        return diagnosis
+
+    def _deployment_owner_for_pod(self, pod: dict) -> dict | None:
+        refs = pod.get("metadata", {}).get("owner_references") or pod.get(
+            "metadata", {}
+        ).get("ownerReferences", [])
+        namespace = pod.get("metadata", {}).get("namespace") or "default"
+        for ref in refs:
+            kind = (ref.get("kind") or "").lower()
+            name = ref.get("name", "")
+            if kind == "deployment" and name:
+                return {"namespace": namespace, "name": name}
+            if kind == "replicaset" and name:
+                owner = self.toolkit.get_owner("replicaset", namespace, name)
+                if owner.get("success"):
+                    for o in owner.get("data", {}).get("owners", []):
+                        o_kind = (o.get("kind") or "").lower()
+                        o_name = o.get("metadata", {}).get("name") or o.get("name", "")
+                        o_ns = (
+                            o.get("metadata", {}).get("namespace")
+                            or namespace
+                        )
+                        if o_kind == "deployment" and o_name:
+                            return {"namespace": o_ns, "name": o_name}
         return None
 
     def _progress(self, step: str) -> None:

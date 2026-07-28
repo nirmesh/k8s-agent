@@ -122,12 +122,20 @@ class RemediationPlanner:
         # request a known-good image if missing, or build the patch directly.
         if _is_image_pull_error(diagnosis):
             image = _get_image_from_user(user_input)
+            workload_resource, workload_manifest = self._resolve_image_pull_workload(diagnosis)
             if not image:
+                target = None
+                if workload_resource:
+                    target = {
+                        "kind": workload_resource["kind"],
+                        "namespace": workload_resource["namespace"],
+                        "name": workload_resource["name"],
+                    }
                 return _need_user_input(
                     "A replacement image is required to fix ImagePullBackOff.",
                     "replacement image",
+                    target=target,
                 )
-            workload_resource, workload_manifest = self._resolve_image_pull_workload(diagnosis)
             if not workload_resource:
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
@@ -190,33 +198,65 @@ class RemediationPlanner:
         return None
 
     def _resolve_image_pull_workload(self, diagnosis: dict) -> tuple[dict | None, Any]:
-        """Find the Deployment that owns the pod with the bad image."""
+        """Find the workload whose current image is the failing one."""
         bad_image = _extract_bad_image(diagnosis)
 
+        # 1. Use an explicit workload affected resource if provided.
+        for candidate in self._extract_affected(diagnosis):
+            res = self._parse_resource(candidate, diagnosis)
+            if res and res["kind"] == "deployment":
+                workload = self._fetch_workload(res["kind"], res["namespace"], res["name"])
+                if workload[0]:
+                    return workload
+
+        # 2. Find a currently failing pod and resolve to its workload.
         pods_result = self.toolkit.get_resources("pod", None)
-        if not pods_result.get("success"):
-            return None, None
-
-        candidates = pods_result.get("data", {}).get("items", [])
-
-        # First try to match the exact bad image, then any image pull failure.
-        failing = [p for p in candidates if self._is_failing_pod(p)]
-        if bad_image:
-            ordered = [p for p in failing if any(
-                bad_image in (c.get("image") or "")
-                for c in p.get("status", {}).get("container_statuses") or p.get("status", {}).get("containerStatuses", [])
-            )] + failing
-        else:
+        if pods_result.get("success"):
+            items = pods_result.get("data", {}).get("items", [])
+            failing = [p for p in items if self._is_failing_pod(p)]
             ordered = failing
+            if bad_image:
+                ordered = [p for p in failing if any(
+                    bad_image in (c.get("image") or "")
+                    for c in p.get("status", {}).get("container_statuses") or p.get("status", {}).get("containerStatuses", [])
+                )] + failing
+            for pod in ordered:
+                workload = self._workload_from_owner_refs(
+                    pod.get("metadata", {}).get("owner_references") or [],
+                    pod.get("metadata", {}).get("namespace") or "default",
+                )
+                if workload[0]:
+                    return workload
 
-        for pod in ordered:
-            workload = self._workload_from_owner_refs(
-                pod.get("metadata", {}).get("owner_references") or [],
-                pod.get("metadata", {}).get("namespace") or "default",
-            )
+        # 3. Fall back to searching all deployments for the bad image.
+        if bad_image:
+            workload = self._deployment_for_image(bad_image)
             if workload[0]:
                 return workload
 
+        return None, None
+
+    def _deployment_for_image(self, image: str) -> tuple[dict | None, Any]:
+        """Return the first deployment whose pod template uses the given image."""
+        result = self.toolkit.get_resources("deployment", None)
+        if not result.get("success"):
+            return None, None
+        for dep in result.get("data", {}).get("items", []):
+            namespace = dep.get("metadata", {}).get("namespace") or "default"
+            name = dep.get("metadata", {}).get("name")
+            if not name:
+                continue
+            containers = (
+                dep.get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("containers", [])
+            )
+            if not isinstance(containers, list):
+                continue
+            for c in containers:
+                if c.get("image") == image:
+                    return self._fetch_workload("deployment", namespace, name)
         return None, None
 
     def _workload_from_owner_refs(
@@ -518,7 +558,7 @@ def _fallback(status: str, summary: str) -> dict:
     }
 
 
-def _need_user_input(summary: str, question: str) -> dict:
+def _need_user_input(summary: str, question: str, target: dict | None = None) -> dict:
     return {
         "status": "NEED_USER_INPUT",
         "summary": summary,
@@ -526,7 +566,7 @@ def _need_user_input(summary: str, question: str) -> dict:
         "risk": "UNKNOWN",
         "tool": None,
         "arguments": None,
-        "target": None,
+        "target": target,
         "changes": [],
         "reason": summary,
         "verification": {"type": "none", "expected": "none"},
