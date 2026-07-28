@@ -6,6 +6,7 @@ from backend.core.database import get_db
 from backend.core.logging import logger
 from backend.kubernetes.executor import set_context
 from backend.services.investigation_service import run_investigation
+from backend.services.remediation_service import create_remediation
 
 
 def create_investigation(user_id: str) -> str:
@@ -62,7 +63,7 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
 
     try:
         progress = _progress_callback(db, investigation_id)
-        result = run_investigation(progress_callback=progress)
+        result = run_investigation(progress_callback=progress, context=context)
 
         namespace = ""
         problematic = result.get("pods", {}).get("problematic_pods", [])
@@ -70,6 +71,12 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
             namespace = problematic[0].get("namespace", "")
 
         diagnosis = result.get("diagnosis", {})
+        remediation_id = create_remediation(
+            investigation_id,
+            result.get("remediation_plan", {}),
+            diagnosis,
+            context,
+        )
 
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
@@ -82,6 +89,7 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
                     "deployments": result.get("deployments", {}),
                     "network": result.get("network", {}),
                     "diagnosis": diagnosis,
+                    "remediation_id": remediation_id,
                     "root_cause": diagnosis.get("root_cause", ""),
                     "namespace": namespace,
                     "confidence": diagnosis.get("confidence", 0),

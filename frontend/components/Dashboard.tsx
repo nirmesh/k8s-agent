@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import apiClient from "@/services/api";
+import RemediationPanel from "@/components/RemediationPanel";
 import ThemeToggle from "@/components/ThemeToggle";
 import type { Cluster, Investigation } from "@/types";
 
@@ -86,6 +87,29 @@ export default function Dashboard() {
       setLoadingClusters(false);
     }
   };
+  const fetchCurrent = async (id: string) => {
+    try {
+      const r = await apiClient.get(`/investigations/${id}`);
+      setCurrent(r.data.investigation);
+    } catch (err: any) {
+      setError("Failed to refresh investigation status");
+    }
+  };
+
+  useEffect(() => {
+    if (!current?.id || !current.remediation_status) return;
+    if (
+      current.remediation_status !== "EXECUTING" &&
+      current.remediation_status !== "VERIFYING"
+    ) {
+      return;
+    }
+    const id = current.id;
+    const interval = setInterval(() => {
+      fetchCurrent(id);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [current?.id, current?.remediation_status]);
 
   const startInvestigation = async () => {
     setInvestigating(true);
@@ -255,6 +279,13 @@ export default function Dashboard() {
                   <FixDisplay fix={current.diagnosis.fix} />
                 </div>
               </div>
+
+              <RemediationPanel
+                remediationId={current.remediation_id}
+                investigation={current}
+                onUpdate={setCurrent}
+              />
+
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Kubectl Command</p>
                 <div className="mt-2 overflow-x-auto rounded-lg border border-slate-700 bg-slate-950 p-4 font-mono text-sm text-emerald-400">

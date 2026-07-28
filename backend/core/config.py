@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     kubeconfig_path: str = "$HOME/.kube/config"
 
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "llama3:latest"
+    ollama_model: str = "llama3.2"
     ollama_timeout: int = 120
 
     mongodb_url: str = "mongodb://localhost:27017"

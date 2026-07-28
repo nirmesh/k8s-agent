@@ -7,3 +7,5 @@ httpx
 python-dotenv
 pymongo
 pyyaml
+kubernetes>=29.0.0
+pytest

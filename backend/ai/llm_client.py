@@ -6,7 +6,7 @@ from backend.core.config import settings
 from backend.core.logging import logger
 
 
-def generate(prompt: str, retries: int = 2) -> str:
+def generate(prompt: str, system: str | None = None, retries: int = 2) -> str:
     """Call the Ollama generate endpoint and return the LLM response text."""
     url = f"{settings.ollama_host}/api/generate"
     payload = {
@@ -15,6 +15,8 @@ def generate(prompt: str, retries: int = 2) -> str:
         "stream": False,
         "format": "json",
     }
+    if system is not None:
+        payload["system"] = system
 
     for attempt in range(retries + 1):
         try:

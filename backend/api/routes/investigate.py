@@ -22,6 +22,11 @@ def _serialize(doc: dict) -> dict:
         value = doc.get(field)
         if isinstance(value, datetime):
             doc[field] = value.isoformat()
+    if isinstance(doc.get("remediation_timeline"), list):
+        for item in doc["remediation_timeline"]:
+            ts = item.get("timestamp")
+            if isinstance(ts, datetime):
+                item["timestamp"] = ts.isoformat()
     return doc
 
 

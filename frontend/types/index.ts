@@ -16,11 +16,34 @@ export interface Diagnosis {
   confidence: number;
 }
 
+export interface RemediationPlan {
+  status: "READY" | "NEED_USER_INPUT" | "NO_SAFE_REMEDIATION";
+  summary?: string;
+  question?: string;
+  risk?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  tool?: string;
+  arguments?: Record<string, unknown>;
+  target?: { kind: string; namespace?: string; name: string };
+  changes?: { path: string; before: string; after: string }[];
+  reason?: string;
+  verification?: { type: string; expected: string };
+  rollback?: { available: boolean; strategy: string };
+}
+
 export interface Investigation {
   id: string;
   status: string;
   steps: { name: string; completed: boolean; timestamp: string }[];
   diagnosis: Diagnosis | null;
+  remediation_plan: RemediationPlan | null;
+  remediation_id?: string;
+  remediation_status?: string;
+  remediation_timeline?: { step: string; completed: boolean; timestamp: string }[];
+  remediation_error?: string | null;
+  remediation_verification?: {
+    status: string;
+    checks: { name: string; status: "PASS" | "WARN" | "FAIL" }[];
+  } | null;
   root_cause: string;
   namespace: string;
   confidence: number;

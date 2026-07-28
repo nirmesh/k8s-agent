@@ -1,0 +1,48 @@
+# Deterministic remediation policy configuration.
+# Risk is computed from the requested tool and the affected Kubernetes kind,
+# never from an LLM-provided classification.
+
+risk_levels:
+  low:
+    tools:
+      - restart_workload
+      - rollback_workload
+
+  medium:
+    tools:
+      - patch_resource
+      - scale_workload
+      - apply_resource
+    fields:
+      - spec.template.spec.containers.*.image
+      - spec.replicas
+      - spec.template.spec.containers.*.resources
+      - spec.template.spec.containers.*.livenessProbe
+      - spec.template.spec.containers.*.readinessProbe
+      - spec.selector
+
+  high:
+    tools:
+      - patch_resource
+      - apply_resource
+    kinds:
+      - ClusterRole
+      - ClusterRoleBinding
+      - Role
+      - RoleBinding
+      - NetworkPolicy
+      - StatefulSet
+      - StorageClass
+      - PersistentVolume
+      - PersistentVolumeClaim
+      - Node
+
+critical:
+  actions:
+    - delete_namespace
+    - delete_pvc
+    - delete_pv
+    - delete_crd
+    - delete_node
+    - modify_cluster_admin
+    - arbitrary_shell_execution

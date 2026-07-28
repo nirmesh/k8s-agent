@@ -1,52 +1,36 @@
 from collections.abc import Callable
 
-from backend.ai.reasoning import analyze
+from backend.ai.remediation_planner import RemediationPlanner
+from backend.ai.sre_agent import SREAgent, normalize_diagnosis
 from backend.core.logging import logger
-from backend.kubernetes.deployment_inspector import inspect_deployments
-from backend.kubernetes.events_analyzer import analyze_events
-from backend.kubernetes.logs_collector import collect_logs
-from backend.kubernetes.network_inspector import inspect_network
-from backend.kubernetes.pod_inspector import inspect_pods
+
+DEFAULT_INCIDENT = (
+    "Investigate the Kubernetes cluster for current incidents, unhealthy resources, "
+    "failing workloads, or any other anomalous state. Determine the root cause."
+)
 
 
-def run_investigation(progress_callback: Callable[[str], None] | None = None) -> dict:
-    """Orchestrate the Kubernetes investigation layers."""
-    logger.info("Starting Kubernetes investigation")
+def run_investigation(
+    progress_callback: Callable[[str], None] | None = None,
+    context: str | None = None,
+) -> dict:
+    """Run the tool-using SRE agent and return a structured diagnosis."""
+    logger.info("Starting SRE agent investigation")
+    agent = SREAgent(context=context)
+    diagnosis = agent.run(
+        incident_description=DEFAULT_INCIDENT,
+        progress_callback=progress_callback,
+    )
 
-    if progress_callback:
-        progress_callback("Checking Pods")
-    pods = inspect_pods()
+    remediation_plan = RemediationPlanner(context=context).plan(diagnosis)
 
-    if progress_callback:
-        progress_callback("Reading Logs")
-    logs = collect_logs(pods.get("problematic_pods", []))
-
-    if progress_callback:
-        progress_callback("Analyzing Events")
-    events = analyze_events()
-
-    if progress_callback:
-        progress_callback("Inspecting Deployments")
-    deployments = inspect_deployments()
-
-    if progress_callback:
-        progress_callback("Checking Networking")
-    network = inspect_network()
-
-    investigation = {
-        "pods": pods,
-        "logs": logs,
-        "events": events,
-        "deployments": deployments,
-        "network": network,
+    return {
+        "pods": {},
+        "logs": {},
+        "events": {},
+        "deployments": {},
+        "network": {},
+        "diagnosis": normalize_diagnosis(diagnosis),
+        "remediation_plan": remediation_plan,
+        "trace": agent.trace,
     }
-
-    if progress_callback:
-        progress_callback("AI Reasoning")
-    diagnosis = analyze(investigation)
-
-    if progress_callback:
-        progress_callback("Root Cause Found")
-
-    investigation["diagnosis"] = diagnosis
-    return investigation
