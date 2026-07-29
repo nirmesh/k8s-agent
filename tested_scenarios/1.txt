@@ -1,0 +1,1 @@
+kubectl set image deployment/broken-nginx nginx=nginx:this-tag-does-not-exist -n sre-lab

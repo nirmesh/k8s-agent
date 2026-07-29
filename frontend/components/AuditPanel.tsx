@@ -120,7 +120,7 @@ export default function AuditPanel({ audit }: AuditPanelProps) {
         <Section title="Why did the AI recommend this?">
           <p><span className="text-slate-500">Root cause:</span> {audit.diagnosis.root_cause || "—"}</p>
           <p><span className="text-slate-500">Explanation:</span> {audit.diagnosis.explanation || "—"}</p>
-          <p><span className="text-slate-500">Confidence:</span> {audit.diagnosis.confidence ?? "—"}</p>
+          <p><span className="text-slate-500">Confidence:</span> {audit.diagnosis.confidence !== undefined ? `${Math.round((audit.diagnosis.confidence || 0) * 100)}%` : "—"}</p>
           {audit.diagnosis.evidence_references && audit.diagnosis.evidence_references.length > 0 && (
             <ul className="mt-1 list-inside list-disc space-y-1">
               {audit.diagnosis.evidence_references.map((e, i) => (

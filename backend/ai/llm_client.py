@@ -13,8 +13,9 @@ def generate(prompt: str, system: str | None = None, retries: int = 2) -> str:
         "model": settings.ollama_model,
         "prompt": prompt,
         "stream": False,
-        "format": "json",
     }
+    if settings.ollama_json_format:
+        payload["format"] = "json"
     if system is not None:
         payload["system"] = system
 

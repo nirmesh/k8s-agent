@@ -88,7 +88,7 @@ To finish with a diagnosis:
 {
   "action": "diagnose",
   "diagnosis": {
-    "status": "DIAGNOSED | NEED_MORE_EVIDENCE | UNKNOWN",
+    "status": "DIAGNOSED | NO_ISSUE | NEED_MORE_EVIDENCE | UNKNOWN",
     "incidentType": "...",
     "rootCause": "...",
     "explanation": "...",
@@ -104,6 +104,7 @@ To finish with a diagnosis:
   }
 }
 
+If the cluster is healthy with no active incidents, return status NO_ISSUE, confidence 1.0, and empty affectedResources.
 Use status NEED_MORE_EVIDENCE only when you have exhausted useful tool calls.
 Do not repeat a tool call with the exact same arguments.
 """
@@ -373,7 +374,11 @@ class SREAgent:
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
         try:
-            return json.loads(text), None
+            start = text.index("{")
+            obj, _ = json.JSONDecoder().raw_decode(text, start)
+            if isinstance(obj, dict):
+                return obj, None
+            return None, "Parsed JSON is not a JSON object"
         except Exception as exc:
             return None, f"{exc}"
 
@@ -618,6 +623,85 @@ class SREAgent:
                         )
                         if o_kind == "deployment" and o_name:
                             return {"namespace": o_ns, "name": o_name}
+        return None
+
+    def _deterministic_diagnosis(self) -> dict | None:
+        """Try known, cheap diagnoses before asking the LLM.
+
+        Returns a complete diagnosis dict or NO_ISSUE dict.  If no known
+        incident is detected, returns a NO_ISSUE diagnosis (not None).
+        """
+        # 1. Known image pull failures.
+        image_pull = self._fallback_image_pull_diagnosis()
+        if image_pull:
+            return image_pull
+
+        # 2. Service selector mismatches: services with zero endpoints.
+        svc = self._service_without_endpoints()
+        if svc:
+            return {
+                "status": "DIAGNOSED",
+                "incidentType": "ServiceSelectorMismatch",
+                "rootCause": (
+                    f"Service {svc['namespace']}/{svc['name']} has no endpoints"
+                ),
+                "explanation": (
+                    "The service selector does not match any pod labels, so no "
+                    "endpoints were created."
+                ),
+                "confidence": 1.0,
+                "affectedResources": [
+                    f"Service/{svc['namespace']}/{svc['name']}"
+                ],
+                "evidence": [
+                    {
+                        "source": "resource",
+                        "description": "Service endpoints list",
+                        "value": f"{svc['namespace']}/{svc['name']}: {svc['subsets']}",
+                    }
+                ],
+            }
+
+        # 3. Nothing failing.
+        return {
+            "status": "NO_ISSUE",
+            "incidentType": "none",
+            "rootCause": "No active issues found",
+            "explanation": (
+                "No unhealthy pods, image pull failures, or empty service "
+                "endpoints were detected."
+            ),
+            "confidence": 1.0,
+            "affectedResources": [],
+            "evidence": [],
+        }
+
+    def _service_without_endpoints(self) -> dict | None:
+        """Return the first service whose endpoints object has no subsets."""
+        services = self.toolkit.get_resources("service", None)
+        endpoints = self.toolkit.get_resources("endpoints", None)
+        if not services.get("success") or not endpoints.get("success"):
+            return None
+
+        ep_map = {}
+        for ep in endpoints.get("data", {}).get("items", []):
+            meta = ep.get("metadata", {})
+            ns = meta.get("namespace") or "default"
+            name = meta.get("name")
+            if name:
+                ep_map[(ns, name)] = ep.get("subsets") or []
+
+        for svc in services.get("data", {}).get("items", []):
+            meta = svc.get("metadata", {})
+            ns = meta.get("namespace") or "default"
+            name = meta.get("name")
+            subsets = ep_map.get((ns, name))
+            if subsets is not None and not subsets:
+                return {
+                    "namespace": ns,
+                    "name": name,
+                    "subsets": subsets,
+                }
         return None
 
     def _progress(self, step: str) -> None:

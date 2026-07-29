@@ -41,6 +41,15 @@ RESOURCE_MAP = {
         "patch": "patch_namespaced_service",
         "create": "create_namespaced_service",
     },
+    "endpoints": {
+        "api": client.CoreV1Api,
+        "namespaced": True,
+        "list_namespaced": "list_namespaced_endpoints",
+        "list_all": "list_endpoints_for_all_namespaces",
+        "read": "read_namespaced_endpoints",
+        "patch": "patch_namespaced_endpoints",
+        "create": "create_namespaced_endpoints",
+    },
     "configmap": {
         "api": client.CoreV1Api,
         "namespaced": True,

@@ -16,6 +16,8 @@ def verify_remediation(target: dict, plan: dict, toolkit: K8sToolkit) -> dict:
         checks.extend(_verify_workload(kind, namespace, name, toolkit))
     elif kind == "pod":
         checks.extend(_verify_pod(namespace, name, toolkit))
+    elif kind == "service":
+        checks.extend(_verify_service(namespace, name, toolkit))
     else:
         resource = toolkit.get_resource(kind, namespace, name)
         checks.append({
@@ -157,6 +159,44 @@ def _verify_pod(namespace: str | None, name: str, toolkit: K8sToolkit) -> list[d
         })
     else:
         checks.append({"name": "Pod Ready", "status": "FAIL"})
+
+    events = toolkit.get_events(namespace, resource_name=name)
+    if events.get("success"):
+        warnings = [
+            e for e in events["data"].get("items", []) if e.get("type") == "Warning"
+        ]
+        checks.append({
+            "name": "Warning events",
+            "status": "PASS" if not warnings else "WARN",
+        })
+    else:
+        checks.append({"name": "Warning events", "status": "WARN"})
+
+    return checks
+
+
+def _verify_service(namespace: str | None, name: str, toolkit: K8sToolkit) -> list[dict]:
+    checks = []
+    resource = toolkit.get_resource("service", namespace, name)
+    checks.append({
+        "name": "Service exists",
+        "status": "PASS" if resource.get("success") else "FAIL",
+    })
+
+    endpoints = toolkit.get_resource("endpoints", namespace, name)
+    if endpoints.get("success"):
+        ep = endpoints["data"].get("resource", {})
+        subsets = ep.get("subsets") or []
+        has_addresses = any(
+            subset.get("addresses")
+            for subset in subsets
+        )
+        checks.append({
+            "name": "Endpoints ready",
+            "status": "PASS" if has_addresses else "FAIL",
+        })
+    else:
+        checks.append({"name": "Endpoints ready", "status": "FAIL"})
 
     events = toolkit.get_events(namespace, resource_name=name)
     if events.get("success"):

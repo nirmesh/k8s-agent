@@ -14,7 +14,8 @@ services:
     environment:
       - MONGODB_URL=mongodb://localhost:27017
       - OLLAMA_HOST=http://localhost:11434
-      - OLLAMA_MODEL=llama3:latest
+      - OLLAMA_MODEL=gpt-oss:120b
+      - OLLAMA_JSON_FORMAT=false
       - KUBECONFIG=/root/.kube/config
       - KUBECONFIG_PATH=/root/.kube/config
     depends_on:

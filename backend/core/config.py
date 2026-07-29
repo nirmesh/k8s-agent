@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.2"
     ollama_timeout: int = 120
+    ollama_json_format: bool = True
 
     mongodb_url: str = "mongodb://localhost:27017"
     mongodb_database: str = "ai_kubernetes_agent"

@@ -152,9 +152,12 @@ export default function Dashboard() {
     <div className="min-h-screen bg-slate-50 p-4 text-slate-900 antialiased md:p-8 dark:bg-slate-950 dark:text-slate-100">
       <div className="mx-auto max-w-4xl space-y-6">
         <header className="flex items-center justify-between rounded-2xl border border-slate-700/30 bg-slate-900/60 px-6 py-4 shadow-lg backdrop-blur">
-          <h1 className="bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-2xl font-bold text-transparent md:text-3xl">
-            AI Kubernetes Agent
-          </h1>
+          <div className="flex flex-col">
+            <h1 className="bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-2xl font-bold text-transparent md:text-3xl">
+              AI Kubernetes Agent
+            </h1>
+            <span className="text-xs italic text-slate-400">no greping at 2 am</span>
+          </div>
           <div className="flex items-center gap-2">
             <ThemeToggle />
             <button
@@ -258,10 +261,12 @@ export default function Dashboard() {
                 <svg className="h-6 w-6 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <h2 className="text-lg font-semibold text-slate-100">Diagnosis</h2>
+                <div className="flex flex-col">
+                  <h2 className="text-lg font-semibold text-slate-100">Diagnosis</h2>
+                </div>
               </div>
               <span className="rounded-full bg-blue-500/20 px-3 py-1 text-sm font-semibold text-blue-300">
-                {current.diagnosis.confidence}% confidence
+                {Math.round((current.diagnosis.confidence || 0) * 100)}% confidence
               </span>
             </div>
             <div className="space-y-6 p-6">
@@ -316,7 +321,7 @@ export default function Dashboard() {
                     <p className="mt-1 text-xs text-slate-500">{new Date(inv.created_at).toLocaleString()}</p>
                   </div>
                   <span className="shrink-0 rounded-full bg-blue-500/20 px-2.5 py-1 text-xs font-semibold text-blue-300">
-                    {inv.confidence}%
+                    {Math.round((inv.confidence || 0) * 100)}%
                   </span>
                 </li>
               ))}

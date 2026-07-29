@@ -100,6 +100,13 @@ class RemediationPlanner:
     def plan(
         self, diagnosis: dict, user_input: dict | None = None
     ) -> dict:
+        if diagnosis.get("status") == "NO_ISSUE":
+            return _fallback(
+                "NO_ISSUE",
+                "No active issues detected.",
+                target={"kind": "cluster", "namespace": "-", "name": "-"},
+            )
+
         affected = self._extract_affected(diagnosis)
         evidence = diagnosis.get("evidence") or []
         if not isinstance(evidence, list):
@@ -123,23 +130,31 @@ class RemediationPlanner:
         if _is_image_pull_error(diagnosis):
             image = _get_image_from_user(user_input)
             workload_resource, workload_manifest = self._resolve_image_pull_workload(diagnosis)
-            if not image:
-                target = None
-                if workload_resource:
-                    target = {
-                        "kind": workload_resource["kind"],
-                        "namespace": workload_resource["namespace"],
-                        "name": workload_resource["name"],
-                    }
-                return _need_user_input(
-                    "A replacement image is required to fix ImagePullBackOff.",
-                    "replacement image",
-                    target=target,
-                )
             if not workload_resource:
+                # No owning workload found. Show the failing pod so the audit Resource isn't blank.
+                failing_pod = self._first_failing_pod(diagnosis)
+                target = None
+                if failing_pod:
+                    meta = failing_pod.get("metadata", {})
+                    target = {
+                        "kind": "pod",
+                        "namespace": meta.get("namespace") or "default",
+                        "name": meta.get("name") or "unknown",
+                    }
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
                     "Could not find a workload that owns the failing pod.",
+                    target=target,
+                )
+            if not image:
+                return _need_user_input(
+                    "A replacement image is required to fix ImagePullBackOff.",
+                    "replacement image",
+                    target={
+                        "kind": workload_resource["kind"],
+                        "namespace": workload_resource["namespace"],
+                        "name": workload_resource["name"],
+                    },
                 )
             image_plan = _build_image_patch_plan(workload_resource, workload_manifest, image)
             return self._validate_plan(image_plan)
@@ -290,6 +305,24 @@ class RemediationPlanner:
         )
         return phase != "Running" or waiting
 
+    def _first_failing_pod(self, diagnosis: dict) -> dict | None:
+        """Return the first pod currently showing an image-pull failure."""
+        bad_image = _extract_bad_image(diagnosis)
+        pods_result = self.toolkit.get_resources("pod", None)
+        if not pods_result.get("success"):
+            return None
+        items = pods_result.get("data", {}).get("items", [])
+        failing = [p for p in items if self._is_failing_pod(p)]
+        if bad_image:
+            for pod in failing:
+                statuses = (
+                    pod.get("status", {}).get("container_statuses")
+                    or pod.get("status", {}).get("containerStatuses", [])
+                )
+                if any(bad_image in (c.get("image") or "") for c in statuses):
+                    return pod
+        return failing[0] if failing else None
+
     def _deployment_owner(self, namespace: str, name: str) -> tuple[dict | None, Any]:
         owner_result = self.toolkit.get_owner("replicaset", namespace, name)
         if not owner_result.get("success"):
@@ -310,6 +343,106 @@ class RemediationPlanner:
                 result.get("data"),
             )
         return None, None
+
+    def _build_service_selector_fix(self, resource: dict) -> dict:
+        """Patch a Service selector so it matches the labels of existing pods."""
+        namespace = resource["namespace"]
+        name = resource["name"]
+
+        svc_result = self.toolkit.get_resource("service", namespace, name)
+        if not svc_result.get("success"):
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Could not fetch service {namespace}/{name}.",
+                target=resource,
+            )
+
+        svc = _extract_resource_obj(svc_result.get("data"))
+        current_selector = svc.get("spec", {}).get("selector") or {}
+        if not current_selector:
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Service {namespace}/{name} has no selector to fix.",
+                target=resource,
+            )
+
+        pods_result = self.toolkit.get_resources("pod", namespace)
+        if not pods_result.get("success"):
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Could not list pods in namespace {namespace}.",
+                target=resource,
+            )
+
+        from collections import Counter, defaultdict
+        value_counts: dict[str, Counter] = defaultdict(Counter)
+        for pod in pods_result.get("data", {}).get("items", []):
+            labels = pod.get("metadata", {}).get("labels") or {}
+            for key in current_selector:
+                val = labels.get(key)
+                if val:
+                    value_counts[key][val] += 1
+
+        new_selector = dict(current_selector)
+        changed = False
+        changes = []
+        for key, current_value in current_selector.items():
+            counts = value_counts.get(key)
+            if not counts:
+                return _fallback(
+                    "NO_SAFE_REMEDIATION",
+                    f"No pods in {namespace} have a label for selector key '{key}'.",
+                    target=resource,
+                )
+            best_value = counts.most_common(1)[0][0]
+            new_selector[key] = best_value
+            if best_value != current_value:
+                changed = True
+                changes.append(
+                    {
+                        "path": f"spec.selector.{key}",
+                        "before": current_value,
+                        "after": best_value,
+                    }
+                )
+
+        if not changed:
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                "Service selector already matches the most common pod labels.",
+                target=resource,
+            )
+
+        patch = {"spec": {"selector": new_selector}}
+        rollback = {"spec": {"selector": current_selector}}
+        return {
+            "status": "READY",
+            "summary": f"Fix {namespace}/{name} selector to match pod labels",
+            "risk": "LOW",
+            "tool": "patch_resource",
+            "arguments": {
+                "kind": "service",
+                "namespace": namespace,
+                "name": name,
+                "patch": patch,
+            },
+            "target": resource,
+            "changes": changes,
+            "reason": (
+                "The service selector does not match any pod labels. Patching "
+                "it to the most common label value for each selector key "
+                "restores endpoints."
+            ),
+            "verification": {
+                "type": "service_endpoints",
+                "expected": "Endpoints object has at least one address",
+            },
+            "rollback": {
+                "available": True,
+                "strategy": "Re-patch selector to previous values",
+                "manifest": rollback,
+            },
+        }
 
     def _build_prompt(
         self,
@@ -352,7 +485,11 @@ class RemediationPlanner:
             if lines and lines[-1].strip().startswith("```"):
                 lines = lines[:-1]
             text = "\n".join(lines).strip()
-        return json.loads(text)
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("No JSON object found in response")
+        obj, _ = json.JSONDecoder().raw_decode(text, start)
+        return obj
 
     def _validate_plan(self, plan: dict) -> dict:
         if not isinstance(plan, dict):
@@ -543,14 +680,14 @@ def _compact(value: Any, max_len: int = 4000) -> str:
     return text
 
 
-def _fallback(status: str, summary: str) -> dict:
+def _fallback(status: str, summary: str, target: dict | None = None) -> dict:
     return {
         "status": status,
         "summary": summary,
         "risk": "UNKNOWN",
         "tool": None,
         "arguments": None,
-        "target": None,
+        "target": target,
         "changes": [],
         "reason": summary,
         "verification": {"type": "none", "expected": "none"},
