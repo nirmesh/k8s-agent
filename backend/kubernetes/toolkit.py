@@ -436,7 +436,7 @@ class K8sToolkit:
         return {}
 
     def _dry_run_kwarg(self, dry_run: bool):
-        return ["All"] if dry_run else None
+        return "All" if dry_run else None
 
     def patch_resource(self, kind: str, namespace: str | None, name: str, patch: dict, dry_run: bool = False) -> dict:
         try:
@@ -444,6 +444,7 @@ class K8sToolkit:
             kwargs = self._namespaced_kwargs(meta, namespace, name)
             kwargs["body"] = patch
             kwargs["dry_run"] = self._dry_run_kwarg(dry_run)
+            kwargs["_content_type"] = "application/merge-patch+json"
             result = self._call(meta["api"], meta["patch"], **kwargs)
             return self._ok("patch_resource", {"kind": kind, "name": name, "dry_run": dry_run, "resource": self._serialize(result)})
         except ValueError as exc:
@@ -475,6 +476,7 @@ class K8sToolkit:
                 patch_kwargs = self._namespaced_kwargs(meta, namespace, name)
                 patch_kwargs["body"] = manifest
                 patch_kwargs["dry_run"] = dry
+                patch_kwargs["_content_type"] = "application/merge-patch+json"
                 result = self._call(meta["api"], meta["patch"], **patch_kwargs)
                 action = "patched"
             elif existing.get("error", {}).get("status") == 404:
@@ -513,6 +515,7 @@ class K8sToolkit:
             kwargs = self._namespaced_kwargs(meta, namespace, name)
             kwargs["body"] = patch
             kwargs["dry_run"] = self._dry_run_kwarg(dry_run)
+            kwargs["_content_type"] = "application/merge-patch+json"
             result = self._call(meta["api"], meta["patch"], **kwargs)
             return self._ok("restart_workload", {"kind": kind, "name": name, "restarted_at": restarted_at, "dry_run": dry_run, "resource": self._serialize(result)})
         except ValueError as exc:
@@ -548,6 +551,7 @@ class K8sToolkit:
             kwargs = self._namespaced_kwargs(meta, namespace, name)
             kwargs["body"] = patch
             kwargs["dry_run"] = self._dry_run_kwarg(dry_run)
+            kwargs["_content_type"] = "application/merge-patch+json"
             result = self._call(meta["api"], meta["patch"], **kwargs)
             return self._ok("scale_workload", {"kind": kind, "name": name, "replicas": replicas, "dry_run": dry_run, "resource": self._serialize(result)})
         except ValueError as exc:

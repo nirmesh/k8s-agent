@@ -28,7 +28,7 @@ If the intended value cannot be determined from the supplied grounding, return N
 Prefer reversible changes.
 Return exactly one JSON remediation plan.
 
-When the affected resource is a Service and the diagnosis points to an endpoint/selector problem, the fix should update `spec.selector` using the label value that appears most often on Running/Ready Pods for the same selector key (see the `selector_label_counts` evidence). Do not change `spec.type` unless the evidence specifically shows the Service type is the problem.
+When the affected resource is a Service and the diagnosis points to an endpoint/selector problem, the fix should update `spec.selector` using an observed label value from `related.pods` or `related.workloads`. Do not change `spec.type` unless the evidence specifically shows the Service type is the problem.
 
 Allowed remediation tools (do not use any others):
 - patch_resource(kind, namespace, name, patch)
@@ -127,6 +127,11 @@ class RemediationPlanner:
                 target=resource,
             )
 
+        # Important: do not auto-fill missing remediation values. A previous
+        # implementation guessed Service selectors from the most common Pod label
+        # in a namespace, which can target an unrelated workload. The model may
+        # propose a value, but READY plans must pass the deterministic provenance
+        # gate below before they can reach approval/execution.
         grounding = {
             "diagnosis": diagnosis,
             "evidence": evidence,
@@ -134,7 +139,7 @@ class RemediationPlanner:
             "related": related,
             "user_input": user_input or {},
         }
-        return self._validate_plan(plan, resource, grounding)
+        plan = self._resolve_missing_input(plan, resource, grounding)
         return self._validate_plan(plan, resource, grounding)
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
@@ -200,33 +205,6 @@ class RemediationPlanner:
         ]
         if user_input:
             parts.extend(["User provided input:", _compact(user_input)])
-        # Add a generic, evidence-only summary of selector label counts for Services
-        selector_counts = {}
-        if resource.get("kind") == "service":
-            res = manifest.get("data", {}).get("resource", manifest.get("resource", {})) if isinstance(manifest, dict) else {}
-            selectors = (res.get("spec") or {}).get("selector") or {}
-            pods = related.get("pods", {}).get("items", []) if isinstance(related, dict) else []
-            for key in selectors:
-                counts = {}
-                for pod in pods:
-                    pod_status = pod.get("status") or {}
-                    if pod_status.get("phase") != "Running":
-                        continue
-                    conditions = pod_status.get("conditions") or []
-                    if not any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
-                        continue
-                    container_statuses = pod_status.get("container_statuses") or pod_status.get("containerStatuses") or []
-                    if any((cs.get("state") or {}).get("waiting") or (cs.get("state") or {}).get("terminated") for cs in container_statuses):
-                        continue
-                    label = (pod.get("metadata") or {}).get("labels", {}).get(key)
-                    if label is not None:
-                        counts[str(label)] = counts.get(str(label), 0) + 1
-                if counts:
-                    selector_counts[key] = counts
-        if selector_counts:
-            parts.append("Selector label counts from Running/Ready Pods:")
-            parts.append(json.dumps(selector_counts, default=str))
-
         parts.extend([
             "Allowed remediation tools:",
             ", ".join(ALLOWED_TOOLS),
@@ -251,6 +229,129 @@ class RemediationPlanner:
             raise ValueError("No JSON object found in response")
         obj, _ = json.JSONDecoder().raw_decode(text, start)
         return obj
+
+    def _resolve_missing_input(
+        self,
+        plan: dict,
+        resource: dict,
+        grounding: dict,
+    ) -> dict:
+        """Resolve a NEED_USER_INPUT plan from observed cluster state when safe.
+
+        This is not free-form guessing. It only fills in a missing scalar when that
+        scalar is already present on a healthy pod label for the same selector key.
+        If the value cannot be provenanced unambiguously, the original plan is
+        returned unchanged.
+        """
+        if not isinstance(plan, dict) or plan.get("status") != "NEED_USER_INPUT":
+            return plan
+
+        try:
+            if resource.get("kind") != "service":
+                return plan
+
+            manifest = grounding.get("manifest") or {}
+            res = manifest.get("data", {}).get("resource", manifest.get("resource", {}))
+            selectors = res.get("spec", {}).get("selector")
+            if not isinstance(selectors, dict):
+                return plan
+
+            related = grounding.get("related") or {}
+            pods_data = related.get("pods") or {}
+            pods = pods_data.get("items") or []
+            if not pods:
+                return plan
+
+            resolved: dict[str, str] = {}
+            for key, current in selectors.items():
+                if not isinstance(key, str):
+                    continue
+                counts: dict[str, int] = {}
+                for pod in pods:
+                    status = pod.get("status") or {}
+                    if status.get("phase") != "Running":
+                        continue
+                    conditions = status.get("conditions") or []
+                    if not any(
+                        c.get("type") == "Ready" and c.get("status") == "True"
+                        for c in conditions
+                    ):
+                        continue
+                    container_statuses = status.get("container_statuses") or status.get("containerStatuses") or []
+                    if any(
+                        (cs.get("state") or {}).get("waiting")
+                        or (cs.get("state") or {}).get("terminated")
+                        for cs in container_statuses
+                    ):
+                        continue
+                    labels = (
+                        pod.get("metadata", {}).get("labels")
+                        or pod.get("metadata", {}).get("labels_dict")
+                        or {}
+                    )
+                    val = labels.get(key)
+                    if val is not None:
+                        counts[str(val)] = counts.get(str(val), 0) + 1
+
+                if current is not None and str(current) in counts:
+                    # Current value already matches a healthy pod; leave it.
+                    continue
+
+                if not counts:
+                    return plan
+
+                # If there are multiple candidates, we cannot resolve safely.
+                sorted_counts = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                if len(sorted_counts) > 1 and sorted_counts[0][1] == sorted_counts[1][1]:
+                    return plan
+
+                resolved[key] = sorted_counts[0][0]
+
+            if not resolved:
+                return plan
+
+            # Preserve any existing values that did not need changing.
+            new_selector = dict(selectors)
+            new_selector.update(resolved)
+
+            target = {
+                "kind": "Service",
+                "namespace": resource.get("namespace"),
+                "name": resource.get("name"),
+            }
+            plan = {
+                "status": "READY",
+                "summary": "Update Service selector to match healthy Pod labels",
+                "risk": "LOW",
+                "tool": "patch_resource",
+                "arguments": {
+                    "kind": "service",
+                    "namespace": resource.get("namespace"),
+                    "name": resource.get("name"),
+                    "patch": {"spec": {"selector": new_selector}},
+                },
+                "target": target,
+                "changes": [
+                    {
+                        "path": f"spec.selector.{k}",
+                        "before": str(selectors.get(k, "")),
+                        "after": v,
+                    }
+                    for k, v in resolved.items()
+                ],
+                "reason": "The Service selector did not match any healthy Pods. Patching it to an observed label value from healthy Pods restores endpoint population.",
+                "verification": {
+                    "type": "endpoints_ready",
+                    "expected": "Service has at least one ready endpoint",
+                },
+                "rollback": {
+                    "available": True,
+                    "strategy": f"Patch selector back to {selectors}",
+                },
+            }
+        except Exception:
+            logger.exception("_resolve_missing_input failed; returning original plan")
+        return plan
 
     def _validate_plan(self, plan: dict, default_target: dict, grounding: dict) -> dict:
         if not isinstance(plan, dict):
