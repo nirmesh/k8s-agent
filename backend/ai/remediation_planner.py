@@ -21,17 +21,11 @@ _SYSTEM_PROMPT = """You are a generic Kubernetes remediation planner.
 Given an evidence-backed diagnosis and the current state of the affected resource, propose the smallest safe change that can resolve the incident.
 
 Do not execute anything.
-Only use the provided resource state and evidence.
-Never invent:
-- image tags
-- secret values
-- ConfigMap contents
-- resource names
-- namespaces
-- storage classes
-- credentials
+Only use values that are explicitly present in the supplied diagnosis/evidence, current manifest, related live resources, or user-provided input.
+Never invent or infer a replacement value merely because it seems plausible.
 
-If a fix requires information that is not present in the evidence or the resource manifest, return NEED_USER_INPUT rather than guessing.
+If a fix requires a value that is not explicitly supported by supplied evidence, return NEED_USER_INPUT rather than guessing.
+If multiple candidate values/resources are present and the intended one is ambiguous, return NEED_USER_INPUT.
 Prefer reversible changes.
 Return exactly one JSON remediation plan.
 
@@ -53,35 +47,18 @@ The `verification` field must describe observable success criteria using a gener
 - pod_ready
 
 Return exactly one JSON object with no markdown or commentary:
-
 {
   "status": "READY | NEED_USER_INPUT | NO_SAFE_REMEDIATION",
   "summary": "<human-readable one-line summary>",
   "question": "<what the user needs to provide; omit for READY/NO_SAFE_REMEDIATION>",
   "risk": "LOW | MEDIUM | HIGH | CRITICAL",
   "tool": "<one of the allowed tool names>",
-  "arguments": {<tool-specific keyword arguments>},
-  "target": {
-    "kind": "<kind>",
-    "namespace": "<namespace>",
-    "name": "<name>"
-  },
-  "changes": [
-    {
-      "path": "<json-path or field>",
-      "before": "<current value or 'unknown'>",
-      "after": "<proposed value>"
-    }
-  ],
+  "arguments": {"tool": "specific keyword arguments"},
+  "target": {"kind": "<kind>", "namespace": "<namespace>", "name": "<name>"},
+  "changes": [{"path": "<json-path or field>", "before": "<current value or unknown>", "after": "<proposed value>"}],
   "reason": "<why this resolves the incident>",
-  "verification": {
-    "type": "<generic verification type>",
-    "expected": "<what should be true after the change>"
-  },
-  "rollback": {
-    "available": true,
-    "strategy": "<how to undo the change>"
-  }
+  "verification": {"type": "<generic verification type>", "expected": "<what should be true after the change>"},
+  "rollback": {"available": true, "strategy": "<how to undo the change>"}
 }
 """
 
@@ -101,9 +78,7 @@ class RemediationPlanner:
             _api_client=_api_client,
         )
 
-    def plan(
-        self, diagnosis: dict, user_input: dict | None = None
-    ) -> dict:
+    def plan(self, diagnosis: dict, user_input: dict | None = None) -> dict:
         if diagnosis.get("status") == "NO_ISSUE":
             return _fallback(
                 "NO_ISSUE",
@@ -117,26 +92,17 @@ class RemediationPlanner:
             evidence = []
 
         if not affected:
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                "No affected resources specified in the diagnosis.",
-            )
+            return _fallback("NO_SAFE_REMEDIATION", "No affected resources specified in the diagnosis.")
 
         resource = self._parse_resource(affected[0], diagnosis)
         if not resource:
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                "Could not parse affected resource identifier.",
-            )
+            return _fallback("NO_SAFE_REMEDIATION", "Could not parse affected resource identifier.")
 
         manifest_result = self.toolkit.get_resource(
             resource["kind"], resource["namespace"], resource["name"]
         )
         if not manifest_result.get("success"):
-            message = (
-                manifest_result.get("error", {}).get("message")
-                or "unknown error"
-            )
+            message = manifest_result.get("error", {}).get("message") or "unknown error"
             return _fallback(
                 "NO_SAFE_REMEDIATION",
                 f"Could not fetch current manifest: {message}",
@@ -160,8 +126,19 @@ class RemediationPlanner:
                 target=resource,
             )
 
-        plan = self._auto_fill(plan, resource, manifest, related)
-        return self._validate_plan(plan, resource)
+        # Important: do not auto-fill missing remediation values. A previous
+        # implementation guessed Service selectors from the most common Pod label
+        # in a namespace, which can target an unrelated workload. The model may
+        # propose a value, but READY plans must pass the deterministic provenance
+        # gate below before they can reach approval/execution.
+        grounding = {
+            "diagnosis": diagnosis,
+            "evidence": evidence,
+            "manifest": manifest,
+            "related": related,
+            "user_input": user_input or {},
+        }
+        return self._validate_plan(plan, resource, grounding)
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
         candidates = diagnosis.get("affectedResources") or diagnosis.get("affected_resources") or []
@@ -172,22 +149,14 @@ class RemediationPlanner:
     def _parse_resource(self, value: str, diagnosis: dict) -> dict | None:
         parts = value.split("/")
         if len(parts) == 3:
-            return {
-                "kind": parts[0].lower(),
-                "namespace": parts[1],
-                "name": parts[2],
-            }
+            return {"kind": parts[0].lower(), "namespace": parts[1], "name": parts[2]}
         if len(parts) == 2:
             namespace = diagnosis.get("namespace", "") or "default"
-            return {
-                "kind": parts[0].lower(),
-                "namespace": namespace,
-                "name": parts[1],
-            }
+            return {"kind": parts[0].lower(), "namespace": namespace, "name": parts[1]}
         return None
 
     def _collect_related(self, resource: dict) -> dict:
-        """Gather a small amount of generic context for the planner prompt."""
+        """Gather generic live context; facts only, never a diagnosis or guessed fix."""
         related: dict = {}
         try:
             owner = self.toolkit.get_owner(
@@ -226,25 +195,18 @@ class RemediationPlanner:
         user_input: dict | None = None,
     ) -> str:
         parts = [
-            "Diagnosis:",
-            _compact(diagnosis),
-            "Evidence:",
-            _compact(evidence),
-            "Affected resource:",
-            _compact(resource),
-            "Current manifest:",
-            _compact(manifest),
-            "Related resources:",
-            _compact(related),
+            "Diagnosis:", _compact(diagnosis),
+            "Evidence:", _compact(evidence),
+            "Affected resource:", _compact(resource),
+            "Current manifest:", _compact(manifest),
+            "Related resources:", _compact(related),
         ]
         if user_input:
-            parts.extend(
-                ["User provided input:", _compact(user_input)]
-            )
+            parts.extend(["User provided input:", _compact(user_input)])
         parts.extend([
             "Allowed remediation tools:",
             ", ".join(ALLOWED_TOOLS),
-            "Return a single JSON remediation plan. Do not execute anything.",
+            "Every replacement/new scalar value must already appear in the supplied evidence, live resource state, or user input. If not, return NEED_USER_INPUT. Return a single JSON remediation plan. Do not execute anything.",
         ])
         prompt = "\n\n".join(parts)
         if len(prompt) > MAX_PROMPT_CHARS:
@@ -266,170 +228,169 @@ class RemediationPlanner:
         obj, _ = json.JSONDecoder().raw_decode(text, start)
         return obj
 
-    def _auto_fill(
-        self,
-        plan: dict,
-        resource: dict,
-        manifest: Any,
-        related: dict,
-    ) -> dict:
-        """Resolve missing values that can be inferred from cluster state.
+    def _validate_plan(self, plan: dict, default_target: dict, grounding: dict) -> dict:
+        if not isinstance(plan, dict):
+            return _fallback("NO_SAFE_REMEDIATION", "Planner did not return a JSON object.", target=default_target)
 
-        Currently handles Service selector mismatches by deriving the intended
-        selector values from the labels of Pods already running in the namespace.
-        """
-        if not isinstance(plan, dict) or plan.get("status") != "NEED_USER_INPUT":
+        status = plan.get("status")
+        if status in {"NEED_USER_INPUT", "NO_SAFE_REMEDIATION"}:
             return plan
 
-        try:
-            if resource.get("kind") != "service":
-                return plan
-
-            res = manifest.get("data", {}).get("resource", manifest.get("resource", {}))
-            selectors = res.get("spec", {}).get("selector")
-            if not isinstance(selectors, dict):
-                return plan
-
-            pods_data = related.get("pods") or {}
-            pods = pods_data.get("items") or []
-            if not pods:
-                return plan
-
-            suggested: dict[str, str] = {}
-            for key, current in selectors.items():
-                if not isinstance(key, str):
-                    continue
-                values: dict[str, int] = {}
-                for pod in pods:
-                    labels = (
-                        pod.get("metadata", {}).get("labels")
-                        or pod.get("metadata", {}).get("labels_dict")
-                        or {}
-                    )
-                    val = labels.get(key)
-                    if val and str(val) != str(current):
-                        values[str(val)] = values.get(str(val), 0) + 1
-                if values:
-                    suggested[key] = max(values.items(), key=lambda kv: kv[1])[0]
-
-            if not suggested:
-                return plan
-
-            arguments = plan.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = {
-                    "kind": "Service",
-                    "namespace": resource.get("namespace"),
-                    "name": resource.get("name"),
-                    "patch": {"spec": {"selector": {}}},
-                }
-                plan["arguments"] = arguments
-
-            patch = arguments.get("patch") or {}
-            if not isinstance(patch, dict):
-                patch = {}
-                arguments["patch"] = patch
-            if "spec" not in patch or not isinstance(patch.get("spec"), dict):
-                patch["spec"] = {}
-            if not isinstance(patch["spec"].get("selector"), dict):
-                patch["spec"]["selector"] = {}
-
-            new_values = dict(patch["spec"]["selector"])
-            new_values.update(suggested)
-            patch["spec"]["selector"] = new_values
-
-            plan["status"] = "READY"
-            plan.pop("question", None)
-            plan["summary"] = (
-                plan.get("summary", "")
-                + f" Inferred selector values {suggested} from pod labels."
-            ).strip()
-            plan["changes"] = [
-                {
-                    "path": f"spec.selector.{k}",
-                    "before": str(selectors.get(k)),
-                    "after": v,
-                }
-                for k, v in suggested.items()
-            ]
-            plan.setdefault("verification", {"type": "endpoints_ready", "expected": "Service has at least one ready endpoint"})
-            plan.setdefault("rollback", {"available": True, "strategy": "Patch selector back to original values using patch_resource"})
-        except Exception:
-            logger.exception("auto-fill failed; returning original plan")
-        return plan
-
-    def _validate_plan(self, plan: dict, default_target: dict) -> dict:
-        if not isinstance(plan, dict):
+        if status != "READY":
             return _fallback(
                 "NO_SAFE_REMEDIATION",
-                "Planner did not return a JSON object.",
+                f"Unknown plan status '{status}'.",
                 target=default_target,
             )
 
-        status = plan.get("status")
+        tool = plan.get("tool")
+        if tool not in ALLOWED_TOOLS:
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Tool '{tool}' is not an allowed remediation tool.",
+                target=default_target,
+            )
 
-        if status == "NEED_USER_INPUT":
-            return plan
+        arguments = plan.get("arguments")
+        if not isinstance(arguments, dict):
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                "arguments must be a JSON object of keyword arguments.",
+                target=default_target,
+            )
 
-        if status == "NO_SAFE_REMEDIATION":
-            return plan
+        method = getattr(self.toolkit, tool, None)
+        if method is None:
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Tool '{tool}' not found on the toolkit.",
+                target=default_target,
+            )
 
-        if status == "READY":
-            tool = plan.get("tool")
-            if tool not in ALLOWED_TOOLS:
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    f"Tool '{tool}' is not an allowed remediation tool.",
-                    target=default_target,
-                )
+        try:
+            inspect.signature(method).bind(**arguments)
+        except Exception as exc:
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                f"Invalid arguments for {tool}: {exc}",
+                target=default_target,
+            )
 
-            arguments = plan.get("arguments")
-            if not isinstance(arguments, dict):
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    "arguments must be a JSON object of keyword arguments.",
-                    target=default_target,
-                )
+        target = plan.get("target")
+        if not isinstance(target, dict) or not all(k in target for k in ("kind", "namespace", "name")):
+            plan["target"] = default_target
+            target = default_target
 
-            method = getattr(self.toolkit, tool, None)
-            if method is None:
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    f"Tool '{tool}' not found on the toolkit.",
-                    target=default_target,
-                )
+        if not _same_target(target, default_target):
+            return _need_input(
+                "Planner proposed a different target than the evidence-backed affected resource.",
+                default_target,
+                "Confirm the exact Kubernetes resource that should be changed.",
+            )
 
-            try:
-                inspect.signature(method).bind(**arguments)
-            except Exception as exc:
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    f"Invalid arguments for {tool}: {exc}",
-                    target=default_target,
-                )
+        unsupported = self._unsupported_mutation_values(tool, arguments, plan, grounding)
+        if unsupported:
+            rendered = ", ".join(f"{path}={value!r}" for path, value in unsupported[:5])
+            return _need_input(
+                f"Blocked remediation because proposed values are not supported by current investigation evidence: {rendered}",
+                default_target,
+                "Provide or collect evidence for the intended replacement value before applying a change.",
+            )
 
-            target = plan.get("target")
-            if not isinstance(target, dict) or not all(
-                k in target for k in ("kind", "namespace", "name")
-            ):
-                plan["target"] = default_target
+        if not isinstance(plan.get("changes"), list):
+            plan["changes"] = []
+        if not isinstance(plan.get("verification"), dict):
+            plan["verification"] = {"type": "resource_exists", "expected": "resource is present"}
+        if not isinstance(plan.get("rollback"), dict):
+            plan["rollback"] = {"available": False, "strategy": "none"}
 
-            if not isinstance(plan.get("changes"), list):
-                plan["changes"] = []
+        plan["evidenceGrounded"] = True
+        return plan
 
-            if not isinstance(plan.get("verification"), dict):
-                plan["verification"] = {"type": "resource_exists", "expected": "resource is present"}
+    def _unsupported_mutation_values(
+        self, tool: str, arguments: dict, plan: dict, grounding: dict
+    ) -> list[tuple[str, Any]]:
+        """Return new scalar values that have no provenance in current evidence.
 
-            if not isinstance(plan.get("rollback"), dict):
-                plan["rollback"] = {"available": False, "strategy": "none"}
+        This is deliberately generic. It does not know about ImagePullBackOff,
+        Service selector mismatches, PVCs, etc. It only enforces that a READY
+        mutation cannot introduce a value the current investigation never observed
+        (or the user never supplied).
+        """
+        candidates: list[tuple[str, Any]] = []
 
-            return plan
+        if tool == "patch_resource":
+            patch = arguments.get("patch")
+            if isinstance(patch, dict):
+                candidates.extend(_leaf_scalars(patch, "patch"))
+        elif tool == "apply_resource":
+            manifest = arguments.get("manifest")
+            if isinstance(manifest, dict):
+                candidates.extend(_leaf_scalars(manifest, "manifest"))
+        elif tool == "scale_workload":
+            if "replicas" in arguments:
+                candidates.append(("replicas", arguments.get("replicas")))
+        # restart_workload and rollback_workload do not introduce arbitrary
+        # configuration values, so target validation is sufficient here.
 
-        return _fallback(
-            "NO_SAFE_REMEDIATION",
-            f"Unknown plan status '{status}'.",
-            target=default_target,
-        )
+        # changes.after is also checked because UI/executor code may rely on it.
+        for index, change in enumerate(plan.get("changes") or []):
+            if isinstance(change, dict) and "after" in change:
+                candidates.append((f"changes[{index}].after", change.get("after")))
+
+        unsupported: list[tuple[str, Any]] = []
+        for path, value in candidates:
+            if value is None or isinstance(value, (dict, list)):
+                continue
+            if _is_structural_value(path, value):
+                continue
+            if not _value_observed(value, grounding):
+                unsupported.append((path, value))
+        return unsupported
+
+
+def _same_target(candidate: dict, expected: dict) -> bool:
+    return (
+        str(candidate.get("kind", "")).lower() == str(expected.get("kind", "")).lower()
+        and str(candidate.get("namespace", "")) == str(expected.get("namespace", ""))
+        and str(candidate.get("name", "")) == str(expected.get("name", ""))
+    )
+
+
+def _leaf_scalars(value: Any, path: str) -> list[tuple[str, Any]]:
+    if isinstance(value, dict):
+        result: list[tuple[str, Any]] = []
+        for key, child in value.items():
+            result.extend(_leaf_scalars(child, f"{path}.{key}"))
+        return result
+    if isinstance(value, list):
+        result = []
+        for index, child in enumerate(value):
+            result.extend(_leaf_scalars(child, f"{path}[{index}]"))
+        return result
+    return [(path, value)]
+
+
+def _is_structural_value(path: str, value: Any) -> bool:
+    """Values identifying the already-validated target are not mutation payloads."""
+    lowered = path.lower()
+    return lowered.endswith(".kind") or lowered.endswith(".namespace") or lowered.endswith(".name")
+
+
+def _value_observed(value: Any, grounding: Any) -> bool:
+    """Exact scalar provenance search through current investigation inputs."""
+    if isinstance(grounding, dict):
+        return any(_value_observed(value, child) for child in grounding.values())
+    if isinstance(grounding, list):
+        return any(_value_observed(value, child) for child in grounding)
+    if grounding is None:
+        return value is None
+    # Keep types meaningful for numbers/bools while accepting stringified values
+    # because Kubernetes serializers and LLM JSON can represent the same scalar
+    # differently.
+    if type(value) is type(grounding) and value == grounding:
+        return True
+    return str(value) == str(grounding)
 
 
 def _compact(value: Any, max_len: int = 4000) -> str:
@@ -437,6 +398,12 @@ def _compact(value: Any, max_len: int = 4000) -> str:
     if len(text) > max_len:
         return text[:max_len] + " ...[truncated]"
     return text
+
+
+def _need_input(summary: str, target: dict, question: str) -> dict:
+    result = _fallback("NEED_USER_INPUT", summary, target=target)
+    result["question"] = question
+    return result
 
 
 def _fallback(status: str, summary: str, target: dict | None = None) -> dict:
