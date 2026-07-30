@@ -1,8 +1,11 @@
 from collections.abc import Callable
+import json
 
 from backend.ai.remediation_planner import RemediationPlanner
 from backend.ai.sre_agent import SREAgent, normalize_diagnosis
 from backend.core.logging import logger
+from backend.kubernetes.detectors import collect_cluster_signals
+from backend.kubernetes.toolkit import K8sToolkit
 
 DEFAULT_INCIDENT = (
     "Investigate the Kubernetes cluster for current incidents, unhealthy resources, "
@@ -13,12 +16,34 @@ DEFAULT_INCIDENT = (
 def run_investigation(
     progress_callback: Callable[[str], None] | None = None,
     context: str | None = None,
+    incident_description: str | None = None,
 ) -> dict:
-    """Run the tool-using SRE agent and return a structured diagnosis."""
+    """Run detector -> tool-using investigator -> remediation planner.
+
+    Cluster-wide mode first collects deterministic *signals* (not diagnoses) so the
+    LLM has concrete starting points. Targeted mode uses the supplied symptom.
+    """
     logger.info("Starting SRE agent investigation")
+    toolkit = K8sToolkit(context=context)
+    signals = collect_cluster_signals(toolkit)
+
+    if incident_description:
+        incident = incident_description
+        if signals:
+            incident += "\n\nCurrently observed cluster signals (treat as leads, verify with tools):\n" + json.dumps(signals, default=str)
+    elif signals:
+        incident = (
+            "Investigate the following automatically detected Kubernetes anomaly signals. "
+            "They are leads, not diagnoses. Verify the relevant resources with tools, follow "
+            "relationships, determine the root cause, and ignore unrelated healthy resources.\n\n"
+            + json.dumps(signals, default=str)
+        )
+    else:
+        incident = DEFAULT_INCIDENT
+
     agent = SREAgent(context=context)
     diagnosis = agent.run(
-        incident_description=DEFAULT_INCIDENT,
+        incident_description=incident,
         progress_callback=progress_callback,
     )
 
@@ -29,8 +54,9 @@ def run_investigation(
         "logs": {},
         "events": {},
         "deployments": {},
-        "network": {},
+        "network": {"signals": signals},
         "diagnosis": normalize_diagnosis(diagnosis),
         "remediation_plan": remediation_plan,
         "trace": agent.trace,
+        "signals": signals,
     }

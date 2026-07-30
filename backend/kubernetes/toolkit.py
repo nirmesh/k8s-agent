@@ -325,7 +325,12 @@ class K8sToolkit:
             logger.exception("get_resource failed")
             return self._err("get_resource", "INTERNAL_ERROR", str(exc))
 
-    def get_events(self, namespace: str | None = None, resource_name: str | None = None) -> dict:
+    def get_events(
+        self,
+        namespace: str | None = None,
+        resource_name: str | None = None,
+        event_type: str | None = None,
+    ) -> dict:
         try:
             kwargs: dict[str, Any] = {}
             if namespace:
@@ -333,25 +338,32 @@ class K8sToolkit:
                 kwargs["namespace"] = namespace
             else:
                 method = "list_event_for_all_namespaces"
+            selectors = []
             if resource_name:
-                kwargs["field_selector"] = f"involvedObject.name={resource_name}"
+                selectors.append(f"involvedObject.name={resource_name}")
+            if event_type:
+                selectors.append(f"type={event_type}")
+            if selectors:
+                kwargs["field_selector"] = ",".join(selectors)
             result = self._call(client.CoreV1Api, method, **kwargs)
             items = [self._serialize(i) for i in (getattr(result, "items", []) or [])]
-            return self._ok("get_events", {"namespace": namespace, "resource_name": resource_name, "items": items})
+            return self._ok("get_events", {"namespace": namespace, "resource_name": resource_name, "event_type": event_type, "items": items})
         except ApiException as exc:
             return self._err("get_events", "K8S_ERROR", exc.reason or str(exc), status=exc.status)
         except Exception as exc:
             logger.exception("get_events failed")
             return self._err("get_events", "INTERNAL_ERROR", str(exc))
 
-    def get_logs(self, namespace: str, pod: str, container: str | None = None, tail_lines: int = 100) -> dict:
+    def get_logs(self, namespace: str, pod: str, container: str | None = None, previous: bool = False, tail_lines: int = 100) -> dict:
         try:
             kwargs: dict[str, Any] = {"name": pod, "namespace": namespace}
             if container:
                 kwargs["container"] = container
+            if previous:
+                kwargs["previous"] = True
             kwargs["tail_lines"] = tail_lines
             logs = self._call(client.CoreV1Api, "read_namespaced_pod_log", **kwargs)
-            return self._ok("get_logs", {"pod": pod, "namespace": namespace, "container": container, "tail_lines": tail_lines, "logs": logs})
+            return self._ok("get_logs", {"pod": pod, "namespace": namespace, "container": container, "previous": previous, "tail_lines": tail_lines, "logs": logs})
         except ApiException as exc:
             return self._err("get_logs", "K8S_ERROR", exc.reason or str(exc), status=exc.status)
         except Exception as exc:

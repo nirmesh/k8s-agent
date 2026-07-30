@@ -160,6 +160,7 @@ class RemediationPlanner:
                 target=resource,
             )
 
+        plan = self._auto_fill(plan, resource, manifest, related)
         return self._validate_plan(plan, resource)
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
@@ -264,6 +265,98 @@ class RemediationPlanner:
             raise ValueError("No JSON object found in response")
         obj, _ = json.JSONDecoder().raw_decode(text, start)
         return obj
+
+    def _auto_fill(
+        self,
+        plan: dict,
+        resource: dict,
+        manifest: Any,
+        related: dict,
+    ) -> dict:
+        """Resolve missing values that can be inferred from cluster state.
+
+        Currently handles Service selector mismatches by deriving the intended
+        selector values from the labels of Pods already running in the namespace.
+        """
+        if not isinstance(plan, dict) or plan.get("status") != "NEED_USER_INPUT":
+            return plan
+
+        try:
+            if resource.get("kind") != "service":
+                return plan
+
+            res = manifest.get("data", {}).get("resource", manifest.get("resource", {}))
+            selectors = res.get("spec", {}).get("selector")
+            if not isinstance(selectors, dict):
+                return plan
+
+            pods_data = related.get("pods") or {}
+            pods = pods_data.get("items") or []
+            if not pods:
+                return plan
+
+            suggested: dict[str, str] = {}
+            for key, current in selectors.items():
+                if not isinstance(key, str):
+                    continue
+                values: dict[str, int] = {}
+                for pod in pods:
+                    labels = (
+                        pod.get("metadata", {}).get("labels")
+                        or pod.get("metadata", {}).get("labels_dict")
+                        or {}
+                    )
+                    val = labels.get(key)
+                    if val and str(val) != str(current):
+                        values[str(val)] = values.get(str(val), 0) + 1
+                if values:
+                    suggested[key] = max(values.items(), key=lambda kv: kv[1])[0]
+
+            if not suggested:
+                return plan
+
+            arguments = plan.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {
+                    "kind": "Service",
+                    "namespace": resource.get("namespace"),
+                    "name": resource.get("name"),
+                    "patch": {"spec": {"selector": {}}},
+                }
+                plan["arguments"] = arguments
+
+            patch = arguments.get("patch") or {}
+            if not isinstance(patch, dict):
+                patch = {}
+                arguments["patch"] = patch
+            if "spec" not in patch or not isinstance(patch.get("spec"), dict):
+                patch["spec"] = {}
+            if not isinstance(patch["spec"].get("selector"), dict):
+                patch["spec"]["selector"] = {}
+
+            new_values = dict(patch["spec"]["selector"])
+            new_values.update(suggested)
+            patch["spec"]["selector"] = new_values
+
+            plan["status"] = "READY"
+            plan.pop("question", None)
+            plan["summary"] = (
+                plan.get("summary", "")
+                + f" Inferred selector values {suggested} from pod labels."
+            ).strip()
+            plan["changes"] = [
+                {
+                    "path": f"spec.selector.{k}",
+                    "before": str(selectors.get(k)),
+                    "after": v,
+                }
+                for k, v in suggested.items()
+            ]
+            plan.setdefault("verification", {"type": "endpoints_ready", "expected": "Service has at least one ready endpoint"})
+            plan.setdefault("rollback", {"available": True, "strategy": "Patch selector back to original values using patch_resource"})
+        except Exception:
+            logger.exception("auto-fill failed; returning original plan")
+        return plan
 
     def _validate_plan(self, plan: dict, default_target: dict) -> dict:
         if not isinstance(plan, dict):
