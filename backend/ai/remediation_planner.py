@@ -1,6 +1,5 @@
 import inspect
 import json
-import re
 from typing import Any
 
 from backend.ai.llm_client import generate
@@ -17,9 +16,9 @@ ALLOWED_TOOLS = [
 
 MAX_PROMPT_CHARS = 12000
 
-_SYSTEM_PROMPT = """You are a Kubernetes remediation planner.
+_SYSTEM_PROMPT = """You are a generic Kubernetes remediation planner.
 
-Given an evidence-backed diagnosis, propose the smallest safe change that can resolve the incident.
+Given an evidence-backed diagnosis and the current state of the affected resource, propose the smallest safe change that can resolve the incident.
 
 Do not execute anything.
 Only use the provided resource state and evidence.
@@ -32,10 +31,9 @@ Never invent:
 - storage classes
 - credentials
 
-If a fix requires information that is not known, return NEED_USER_INPUT rather than guessing.
+If a fix requires information that is not present in the evidence or the resource manifest, return NEED_USER_INPUT rather than guessing.
 Prefer reversible changes.
-Return exactly one primary remediation plan.
-Every remediation must contain verification and rollback information.
+Return exactly one JSON remediation plan.
 
 Allowed remediation tools (do not use any others):
 - patch_resource(kind, namespace, name, patch)
@@ -44,16 +42,22 @@ Allowed remediation tools (do not use any others):
 - rollback_workload(kind, namespace, name)
 - scale_workload(kind, namespace, name, replicas)
 
-For ImagePullBackOff caused by an invalid image tag, DO NOT invent a replacement image tag.
-If no known-good tag can be derived from deployment history, ReplicaSet history, user input, registry evidence, or another trustworthy source, return:
-  status: NEED_USER_INPUT
-and ask the user to provide/select the desired image.
+The `verification` field must describe observable success criteria using a generic verification type such as:
+- resource_exists
+- resource_ready
+- rollout_status
+- endpoints_ready
+- pods_ready
+- pvc_bound
+- pod_scheduled
+- pod_ready
 
 Return exactly one JSON object with no markdown or commentary:
 
 {
   "status": "READY | NEED_USER_INPUT | NO_SAFE_REMEDIATION",
   "summary": "<human-readable one-line summary>",
+  "question": "<what the user needs to provide; omit for READY/NO_SAFE_REMEDIATION>",
   "risk": "LOW | MEDIUM | HIGH | CRITICAL",
   "tool": "<one of the allowed tool names>",
   "arguments": {<tool-specific keyword arguments>},
@@ -71,19 +75,19 @@ Return exactly one JSON object with no markdown or commentary:
   ],
   "reason": "<why this resolves the incident>",
   "verification": {
-    "type": "<how to verify, e.g. 'rollout_status' or 'pod_ready'>",
+    "type": "<generic verification type>",
     "expected": "<what should be true after the change>"
   },
   "rollback": {
     "available": true,
-    "strategy": "<how to undo the change, e.g. re-apply previous manifest or scale back>"
+    "strategy": "<how to undo the change>"
   }
 }
 """
 
 
 class RemediationPlanner:
-    """Propose, but do not execute, Kubernetes remediation plans."""
+    """Propose, but do not execute, generic Kubernetes remediation plans."""
 
     def __init__(
         self,
@@ -125,40 +129,6 @@ class RemediationPlanner:
                 "Could not parse affected resource identifier.",
             )
 
-        # Deterministic image-pull remediation: resolve to the owning workload,
-        # request a known-good image if missing, or build the patch directly.
-        if _is_image_pull_error(diagnosis):
-            image = _get_image_from_user(user_input)
-            workload_resource, workload_manifest = self._resolve_image_pull_workload(diagnosis)
-            if not workload_resource:
-                # No owning workload found. Show the failing pod so the audit Resource isn't blank.
-                failing_pod = self._first_failing_pod(diagnosis)
-                target = None
-                if failing_pod:
-                    meta = failing_pod.get("metadata", {})
-                    target = {
-                        "kind": "pod",
-                        "namespace": meta.get("namespace") or "default",
-                        "name": meta.get("name") or "unknown",
-                    }
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    "Could not find a workload that owns the failing pod.",
-                    target=target,
-                )
-            if not image:
-                return _need_user_input(
-                    "A replacement image is required to fix ImagePullBackOff.",
-                    "replacement image",
-                    target={
-                        "kind": workload_resource["kind"],
-                        "namespace": workload_resource["namespace"],
-                        "name": workload_resource["name"],
-                    },
-                )
-            image_plan = _build_image_patch_plan(workload_resource, workload_manifest, image)
-            return self._validate_plan(image_plan)
-
         manifest_result = self.toolkit.get_resource(
             resource["kind"], resource["namespace"], resource["name"]
         )
@@ -170,11 +140,13 @@ class RemediationPlanner:
             return _fallback(
                 "NO_SAFE_REMEDIATION",
                 f"Could not fetch current manifest: {message}",
+                target=resource,
             )
 
         manifest = manifest_result.get("data")
+        related = self._collect_related(resource)
         prompt = self._build_prompt(
-            diagnosis, evidence, resource, manifest, user_input=user_input
+            diagnosis, evidence, resource, manifest, related, user_input=user_input
         )
         raw = generate(prompt, system=_SYSTEM_PROMPT)
 
@@ -185,9 +157,10 @@ class RemediationPlanner:
             return _fallback(
                 "NO_SAFE_REMEDIATION",
                 f"Planner returned invalid JSON: {exc}",
+                target=resource,
             )
 
-        return self._validate_plan(plan)
+        return self._validate_plan(plan, resource)
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
         candidates = diagnosis.get("affectedResources") or diagnosis.get("affected_resources") or []
@@ -212,237 +185,35 @@ class RemediationPlanner:
             }
         return None
 
-    def _resolve_image_pull_workload(self, diagnosis: dict) -> tuple[dict | None, Any]:
-        """Find the workload whose current image is the failing one."""
-        bad_image = _extract_bad_image(diagnosis)
+    def _collect_related(self, resource: dict) -> dict:
+        """Gather a small amount of generic context for the planner prompt."""
+        related: dict = {}
+        try:
+            owner = self.toolkit.get_owner(
+                resource["kind"], resource.get("namespace"), resource["name"]
+            )
+            if owner.get("success"):
+                related["owner"] = owner.get("data", {})
 
-        # 1. Use an explicit workload affected resource if provided.
-        for candidate in self._extract_affected(diagnosis):
-            res = self._parse_resource(candidate, diagnosis)
-            if res and res["kind"] == "deployment":
-                workload = self._fetch_workload(res["kind"], res["namespace"], res["name"])
-                if workload[0]:
-                    return workload
+            owned = self.toolkit.get_owned_resources(
+                resource["kind"], resource.get("namespace"), resource["name"]
+            )
+            if owned.get("success"):
+                related["owned"] = owned.get("data", {})
 
-        # 2. Find a currently failing pod and resolve to its workload.
-        pods_result = self.toolkit.get_resources("pod", None)
-        if pods_result.get("success"):
-            items = pods_result.get("data", {}).get("items", [])
-            failing = [p for p in items if self._is_failing_pod(p)]
-            ordered = failing
-            if bad_image:
-                ordered = [p for p in failing if any(
-                    bad_image in (c.get("image") or "")
-                    for c in p.get("status", {}).get("container_statuses") or p.get("status", {}).get("containerStatuses", [])
-                )] + failing
-            for pod in ordered:
-                workload = self._workload_from_owner_refs(
-                    pod.get("metadata", {}).get("owner_references") or [],
-                    pod.get("metadata", {}).get("namespace") or "default",
+            if resource.get("namespace"):
+                events = self.toolkit.get_events(
+                    namespace=resource["namespace"], resource_name=resource["name"]
                 )
-                if workload[0]:
-                    return workload
+                if events.get("success"):
+                    related["events"] = events.get("data", {})
 
-        # 3. Fall back to searching all deployments for the bad image.
-        if bad_image:
-            workload = self._deployment_for_image(bad_image)
-            if workload[0]:
-                return workload
-
-        return None, None
-
-    def _deployment_for_image(self, image: str) -> tuple[dict | None, Any]:
-        """Return the first deployment whose pod template uses the given image."""
-        result = self.toolkit.get_resources("deployment", None)
-        if not result.get("success"):
-            return None, None
-        for dep in result.get("data", {}).get("items", []):
-            namespace = dep.get("metadata", {}).get("namespace") or "default"
-            name = dep.get("metadata", {}).get("name")
-            if not name:
-                continue
-            containers = (
-                dep.get("spec", {})
-                .get("template", {})
-                .get("spec", {})
-                .get("containers", [])
-            )
-            if not isinstance(containers, list):
-                continue
-            for c in containers:
-                if c.get("image") == image:
-                    return self._fetch_workload("deployment", namespace, name)
-        return None, None
-
-    def _workload_from_owner_refs(
-        self, refs: list, namespace: str
-    ) -> tuple[dict | None, Any]:
-        """Resolve a pod's ownerReferences to the top workload."""
-        for ref in refs:
-            kind = (ref.get("kind") or "").lower()
-            name = ref.get("name", "")
-            if not kind or not name:
-                continue
-            if kind == "deployment":
-                return self._fetch_workload(kind, namespace, name)
-        for ref in refs:
-            kind = (ref.get("kind") or "").lower()
-            name = ref.get("name", "")
-            if kind == "replicaset" and name:
-                workload = self._deployment_owner(namespace, name)
-                if workload[0]:
-                    return workload
-        return None, None
-
-    def _is_failing_pod(self, pod: dict) -> bool:
-        status = pod.get("status", {})
-        phase = status.get("phase", "")
-        container_statuses = status.get("container_statuses") or status.get("containerStatuses", [])
-        waiting = any(
-            ((c.get("state") or {}).get("waiting") or {}).get("reason")
-            in ("ImagePullBackOff", "ErrImagePull")
-            for c in container_statuses
-        )
-        return phase != "Running" or waiting
-
-    def _first_failing_pod(self, diagnosis: dict) -> dict | None:
-        """Return the first pod currently showing an image-pull failure."""
-        bad_image = _extract_bad_image(diagnosis)
-        pods_result = self.toolkit.get_resources("pod", None)
-        if not pods_result.get("success"):
-            return None
-        items = pods_result.get("data", {}).get("items", [])
-        failing = [p for p in items if self._is_failing_pod(p)]
-        if bad_image:
-            for pod in failing:
-                statuses = (
-                    pod.get("status", {}).get("container_statuses")
-                    or pod.get("status", {}).get("containerStatuses", [])
-                )
-                if any(bad_image in (c.get("image") or "") for c in statuses):
-                    return pod
-        return failing[0] if failing else None
-
-    def _deployment_owner(self, namespace: str, name: str) -> tuple[dict | None, Any]:
-        owner_result = self.toolkit.get_owner("replicaset", namespace, name)
-        if not owner_result.get("success"):
-            return None, None
-        for owner in owner_result.get("data", {}).get("owners", []):
-            kind = (owner.get("kind") or "").lower()
-            owner_name = owner.get("metadata", {}).get("name") or owner.get("name", "")
-            owner_ns = owner.get("metadata", {}).get("namespace") or namespace
-            if kind == "deployment" and owner_name:
-                return self._fetch_workload(kind, owner_ns, owner_name)
-        return None, None
-
-    def _fetch_workload(self, kind: str, namespace: str | None, name: str) -> tuple[dict | None, Any]:
-        result = self.toolkit.get_resource(kind, namespace, name)
-        if result.get("success"):
-            return (
-                {"kind": kind, "namespace": namespace, "name": name},
-                result.get("data"),
-            )
-        return None, None
-
-    def _build_service_selector_fix(self, resource: dict) -> dict:
-        """Patch a Service selector so it matches the labels of existing pods."""
-        namespace = resource["namespace"]
-        name = resource["name"]
-
-        svc_result = self.toolkit.get_resource("service", namespace, name)
-        if not svc_result.get("success"):
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                f"Could not fetch service {namespace}/{name}.",
-                target=resource,
-            )
-
-        svc = _extract_resource_obj(svc_result.get("data"))
-        current_selector = svc.get("spec", {}).get("selector") or {}
-        if not current_selector:
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                f"Service {namespace}/{name} has no selector to fix.",
-                target=resource,
-            )
-
-        pods_result = self.toolkit.get_resources("pod", namespace)
-        if not pods_result.get("success"):
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                f"Could not list pods in namespace {namespace}.",
-                target=resource,
-            )
-
-        from collections import Counter, defaultdict
-        value_counts: dict[str, Counter] = defaultdict(Counter)
-        for pod in pods_result.get("data", {}).get("items", []):
-            labels = pod.get("metadata", {}).get("labels") or {}
-            for key in current_selector:
-                val = labels.get(key)
-                if val:
-                    value_counts[key][val] += 1
-
-        new_selector = dict(current_selector)
-        changed = False
-        changes = []
-        for key, current_value in current_selector.items():
-            counts = value_counts.get(key)
-            if not counts:
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    f"No pods in {namespace} have a label for selector key '{key}'.",
-                    target=resource,
-                )
-            best_value = counts.most_common(1)[0][0]
-            new_selector[key] = best_value
-            if best_value != current_value:
-                changed = True
-                changes.append(
-                    {
-                        "path": f"spec.selector.{key}",
-                        "before": current_value,
-                        "after": best_value,
-                    }
-                )
-
-        if not changed:
-            return _fallback(
-                "NO_SAFE_REMEDIATION",
-                "Service selector already matches the most common pod labels.",
-                target=resource,
-            )
-
-        patch = {"spec": {"selector": new_selector}}
-        rollback = {"spec": {"selector": current_selector}}
-        return {
-            "status": "READY",
-            "summary": f"Fix {namespace}/{name} selector to match pod labels",
-            "risk": "LOW",
-            "tool": "patch_resource",
-            "arguments": {
-                "kind": "service",
-                "namespace": namespace,
-                "name": name,
-                "patch": patch,
-            },
-            "target": resource,
-            "changes": changes,
-            "reason": (
-                "The service selector does not match any pod labels. Patching "
-                "it to the most common label value for each selector key "
-                "restores endpoints."
-            ),
-            "verification": {
-                "type": "service_endpoints",
-                "expected": "Endpoints object has at least one address",
-            },
-            "rollback": {
-                "available": True,
-                "strategy": "Re-patch selector to previous values",
-                "manifest": rollback,
-            },
-        }
+                pods = self.toolkit.list_resources("pod", namespace=resource["namespace"])
+                if pods.get("success"):
+                    related["pods"] = pods.get("data", {})
+        except Exception:
+            logger.exception("failed to collect related resources for planner")
+        return related
 
     def _build_prompt(
         self,
@@ -450,6 +221,7 @@ class RemediationPlanner:
         evidence: list,
         resource: dict,
         manifest: Any,
+        related: dict,
         user_input: dict | None = None,
     ) -> str:
         parts = [
@@ -461,6 +233,8 @@ class RemediationPlanner:
             _compact(resource),
             "Current manifest:",
             _compact(manifest),
+            "Related resources:",
+            _compact(related),
         ]
         if user_input:
             parts.extend(
@@ -491,11 +265,12 @@ class RemediationPlanner:
         obj, _ = json.JSONDecoder().raw_decode(text, start)
         return obj
 
-    def _validate_plan(self, plan: dict) -> dict:
+    def _validate_plan(self, plan: dict, default_target: dict) -> dict:
         if not isinstance(plan, dict):
             return _fallback(
                 "NO_SAFE_REMEDIATION",
                 "Planner did not return a JSON object.",
+                target=default_target,
             )
 
         status = plan.get("status")
@@ -512,6 +287,7 @@ class RemediationPlanner:
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
                     f"Tool '{tool}' is not an allowed remediation tool.",
+                    target=default_target,
                 )
 
             arguments = plan.get("arguments")
@@ -519,6 +295,7 @@ class RemediationPlanner:
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
                     "arguments must be a JSON object of keyword arguments.",
+                    target=default_target,
                 )
 
             method = getattr(self.toolkit, tool, None)
@@ -526,6 +303,7 @@ class RemediationPlanner:
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
                     f"Tool '{tool}' not found on the toolkit.",
+                    target=default_target,
                 )
 
             try:
@@ -534,143 +312,31 @@ class RemediationPlanner:
                 return _fallback(
                     "NO_SAFE_REMEDIATION",
                     f"Invalid arguments for {tool}: {exc}",
+                    target=default_target,
                 )
 
             target = plan.get("target")
             if not isinstance(target, dict) or not all(
                 k in target for k in ("kind", "namespace", "name")
             ):
-                return _fallback(
-                    "NO_SAFE_REMEDIATION",
-                    "Plan target must be a dict with 'kind', 'namespace', and 'name'.",
-                )
+                plan["target"] = default_target
+
+            if not isinstance(plan.get("changes"), list):
+                plan["changes"] = []
+
+            if not isinstance(plan.get("verification"), dict):
+                plan["verification"] = {"type": "resource_exists", "expected": "resource is present"}
+
+            if not isinstance(plan.get("rollback"), dict):
+                plan["rollback"] = {"available": False, "strategy": "none"}
 
             return plan
 
         return _fallback(
             "NO_SAFE_REMEDIATION",
             f"Unknown plan status '{status}'.",
+            target=default_target,
         )
-
-
-def _extract_bad_image(diagnosis: dict) -> str:
-    text = json.dumps(diagnosis, default=str)
-    # Match a docker image reference that includes a colon (tag or digest).
-    matches = re.findall(r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+", text)
-    for m in matches:
-        if ":" in m:
-            return m
-    return ""
-
-
-def _is_image_pull_error(diagnosis: dict) -> bool:
-    text = json.dumps(diagnosis, default=str).lower()
-    return any(
-        term in text
-        for term in (
-            "imagepullbackoff",
-            "errimagepull",
-            "failed to pull image",
-            "failed to resolve image",
-            "invalid image",
-            "non-existent image",
-            "nonexistent image",
-        )
-    )
-
-
-def _get_image_from_user(user_input: dict | None) -> str | None:
-    if not isinstance(user_input, dict):
-        return None
-    image = user_input.get("image") or user_input.get("container_image") or user_input.get("tag")
-    if isinstance(image, str) and image.strip():
-        return image.strip()
-    return None
-
-
-def _extract_resource_obj(manifest: Any) -> dict:
-    if isinstance(manifest, dict):
-        if "resource" in manifest:
-            return manifest.get("resource") or {}
-        return manifest
-    return {}
-
-
-def _build_image_patch_plan(resource: dict, manifest: Any, image: str) -> dict:
-    resource_obj = _extract_resource_obj(manifest)
-    containers = (
-        resource_obj.get("spec", {})
-        .get("template", {})
-        .get("spec", {})
-        .get("containers", [])
-    )
-    if not containers:
-        return _fallback("NO_SAFE_REMEDIATION", "Workload manifest has no containers to patch.")
-    if not isinstance(containers, list):
-        return _fallback("NO_SAFE_REMEDIATION", "Workload containers are not in the expected list format.")
-
-    container_name = containers[0].get("name")
-    if not container_name:
-        return _fallback("NO_SAFE_REMEDIATION", "First container has no name.")
-
-    before = containers[0].get("image", "unknown")
-    patch = {
-        "spec": {
-            "template": {
-                "spec": {
-                    "containers": [
-                        {
-                            "name": container_name,
-                            "image": image,
-                        }
-                    ]
-                }
-            }
-        }
-    }
-    rollback_strategy = (
-        "Roll back to previous Deployment revision"
-        if resource.get("kind") == "deployment"
-        else "Re-patch image to previous value"
-    )
-    return {
-        "status": "READY",
-        "summary": f"Replace container image with {image}",
-        "risk": "MEDIUM",
-        "tool": "patch_resource",
-        "arguments": {
-            "kind": resource["kind"],
-            "namespace": resource["namespace"],
-            "name": resource["name"],
-            "patch": patch,
-        },
-        "target": {
-            "kind": resource["kind"],
-            "namespace": resource["namespace"],
-            "name": resource["name"],
-        },
-        "changes": [
-            {
-                "path": "spec.template.spec.containers[0].name",
-                "before": container_name,
-                "after": container_name,
-            },
-            {
-                "path": "spec.template.spec.containers[0].image",
-                "before": before,
-                "after": image,
-            },
-        ],
-        "reason": "The current image cannot be pulled. Replacing it with a known-good image resolves ImagePullBackOff.",
-        "verification": {
-            "type": "rollout_status",
-            "expected": "Deployment rollout succeeds and new pods become Ready",
-        },
-        "rollback": {
-            "available": True,
-            "strategy": rollback_strategy,
-        },
-    }
 
 
 def _compact(value: Any, max_len: int = 4000) -> str:
@@ -684,22 +350,6 @@ def _fallback(status: str, summary: str, target: dict | None = None) -> dict:
     return {
         "status": status,
         "summary": summary,
-        "risk": "UNKNOWN",
-        "tool": None,
-        "arguments": None,
-        "target": target,
-        "changes": [],
-        "reason": summary,
-        "verification": {"type": "none", "expected": "none"},
-        "rollback": {"available": False, "strategy": "none"},
-    }
-
-
-def _need_user_input(summary: str, question: str, target: dict | None = None) -> dict:
-    return {
-        "status": "NEED_USER_INPUT",
-        "summary": summary,
-        "question": question,
         "risk": "UNKNOWN",
         "tool": None,
         "arguments": None,

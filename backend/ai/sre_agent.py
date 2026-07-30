@@ -1,16 +1,15 @@
 import inspect
 import json
-import re
 import time
 from collections.abc import Callable
 from typing import Any
 
-from backend.ai.llm_client import generate
+from backend.ai.llm_client import chat
 from backend.core.logging import logger
 from backend.kubernetes.toolkit import K8sToolkit
 
 MAX_ITERATIONS = 10
-MAX_OBSERVATION_CHARS = 4000
+MAX_OBSERVATION_CHARS = 12000
 
 DEFAULT_INCIDENT = (
     "Investigate the Kubernetes cluster for current incidents, unhealthy resources, "
@@ -18,100 +17,112 @@ DEFAULT_INCIDENT = (
 )
 
 READ_TOOLS = [
-    "get_resources",
+    "list_resources",
     "get_resource",
     "get_events",
     "get_logs",
     "get_owner",
-    "get_rollout_status",
+    "get_owned_resources",
+    "find_resources_by_labels",
+    "find_resources_by_selector",
+    "discover_api_resources",
+    "get_resource_usage",
 ]
 
-_SYSTEM_PROMPT = """You are a Kubernetes SRE investigator.
+_SYSTEM_PROMPT = """You are a generic Kubernetes SRE investigator.
 
-Your job is to determine the root cause of Kubernetes incidents using evidence.
+Your job is to determine the root cause of an incident using only evidence gathered from read-only Kubernetes tools.
 
-Do not assume cluster state. Use available tools to gather evidence.
+Do not assume cluster state. Use the available tools to observe, hypothesize, and gather evidence.
 
-Prefer this investigation sequence when applicable:
-1. Resource status (get_resources / get_resource)
-2. Kubernetes events (get_events)
-3. Owner/workload (get_owner)
-4. Workload manifest (get_resource)
-5. Relevant logs (get_logs)
+On every turn you must return exactly one assistant message. Ollama supports native tool calls, or if no tool is needed, output a single JSON object.
 
-Do not keep calling tools after sufficient evidence exists.
-Do not invent resources, logs, events, image tags, namespaces, or configuration.
-If evidence is insufficient, explicitly state what evidence is missing.
-When the root cause is established, return a structured diagnosis.
-You cannot modify the Kubernetes cluster.
+When you need more evidence, use one or more tool_calls. When the evidence is sufficient, return a diagnosis JSON.
 
-When the incident involves ImagePullBackOff, include the exact failing image (e.g. 'nginx:this-tag-does-not-exist') in one of the evidence values, and use the owning Deployment as the affected resource.
+Return ONLY one of the following:
+1. A tool-call block (Ollama format) using one of the available tools.
+2. A single JSON object with action="diagnose" and the diagnosis schema below.
 
-The `affectedResources` list MUST use the exact resource identifiers from your tool output, with the form:
-"kind/namespace/name" (for example, "Deployment/sre-lab/broken-nginx").
-For pod-level symptoms such as ImagePullBackOff, you MUST identify the owning Deployment and report ONLY the Deployment identifier. Do NOT report the Pod identifier. If the owning Deployment cannot be determined, leave affectedResources empty.
+Rules:
+- Do not invent resources, namespaces, names, logs, events, image tags, secrets, or configuration values.
+- Do not repeat a tool call with the exact same arguments.
+- If evidence is insufficient after reasonable investigation, return status NEED_MORE_EVIDENCE and say what evidence is missing.
+- If the reported symptom is not observable, return status NO_ISSUE.
+- If you find a root cause, return status DIAGNOSED.
+- affectedResources must use the exact identifiers returned by tools, with form "Kind/namespace/name" (e.g. "Deployment/sre-lab/broken-nginx").
+- Report only the resources that are actually affected. For pod-level symptoms, prefer the owning workload.
+- Evidence values must come from tool outputs or the user-provided incident.
 
-Available tools (JSON mode):
+Available tools:
 
-- get_resources(kind: string, namespace?: string)
-  Returns a list of resources. Use namespace to scope, omit for all namespaces.
+- list_resources(kind, namespace=None, api_version=None, label_selector=None, field_selector=None)
+  List resources of `kind`. Omit namespace for all namespaces. Use label_selector/field_selector to filter.
 
-- get_resource(kind: string, namespace: string | null, name: string)
-  Returns a single resource. Use namespace=null for cluster-scoped resources.
+- get_resource(kind, namespace, name, api_version=None)
+  Read one resource. Use namespace=null for cluster-scoped resources.
 
-- get_events(namespace?: string, resource_name?: string)
-  Returns Kubernetes events. Provide resource_name to filter by involved object.
+- get_events(namespace=None, resource_name=None, event_type=None)
+  Read Kubernetes events. Provide resource_name to filter by involved object. event_type can be "Warning" or "Normal".
 
-- get_logs(namespace: string, pod: string, container?: string, tail_lines?: int)
-  Returns container logs. Default tail_lines is 100.
+- get_logs(namespace, pod, container=None, previous=False, tail_lines=100)
+  Read container logs.
 
-- get_owner(kind: string, namespace: string | null, name: string)
-  Reads a resource and resolves its ownerReferences to the owning resources.
+- get_owner(kind, namespace, name)
+  Resolve ownerReferences for a resource up to the top-level owner.
 
-- get_rollout_status(kind: string, namespace: string | null, name: string)
-  Returns readiness for Deployment, StatefulSet, DaemonSet, or ReplicaSet.
+- get_owned_resources(kind, namespace, name)
+  Find resources owned by the named resource via ownerReferences.
 
-On every turn you must return exactly one JSON object. No markdown, no explanation outside the JSON.
+- find_resources_by_labels(labels, namespace=None, kind="pod")
+  Find resources of `kind` whose labels match the given label dictionary.
 
-To call a tool:
-{
-  "action": "tool_call",
-  "tool": "get_resource",
-  "arguments": {
-    "kind": "pod",
-    "namespace": "default",
-    "name": "my-pod"
-  }
-}
+- find_resources_by_selector(selector, namespace=None, kind="pod")
+  Find resources of `kind` matching a Kubernetes selector dictionary.
 
-To finish with a diagnosis:
+- discover_api_resources()
+  Return the resource kinds and API versions the tool layer can query.
+
+- get_resource_usage(namespace=None, kind="pod", name=None)
+  Request resource usage metrics (requires metrics-server). Currently a stub.
+
+To finish with a diagnosis, return exactly one JSON object:
 {
   "action": "diagnose",
   "diagnosis": {
-    "status": "DIAGNOSED | NO_ISSUE | NEED_MORE_EVIDENCE | UNKNOWN",
-    "incidentType": "...",
-    "rootCause": "...",
-    "explanation": "...",
+    "status": "DIAGNOSED | NEED_MORE_EVIDENCE | NO_ISSUE",
+    "rootCause": "<short root cause sentence>",
+    "explanation": "<evidence-based explanation>",
     "confidence": 0.0,
-    "affectedResources": ["kind/namespace/name"],
+    "affectedResources": ["Kind/namespace/name"],
     "evidence": [
       {
-        "source": "event|log|resource|manifest",
-        "description": "...",
-        "value": "..."
+        "source": "tool_name",
+        "description": "<what this evidence shows>",
+        "value": "<relevant excerpt or fact>"
       }
     ]
   }
 }
 
-If the cluster is healthy with no active incidents, return status NO_ISSUE, confidence 1.0, and empty affectedResources.
-Use status NEED_MORE_EVIDENCE only when you have exhausted useful tool calls.
-Do not repeat a tool call with the exact same arguments.
+Do not wrap the diagnosis in markdown. Do not include any commentary outside the JSON.
 """
+
+OLLAMA_TOOLS = [
+    {"type": "function", "function": {"name": "list_resources", "description": "List Kubernetes resources of a kind, optionally filtered by namespace, label selector, or field selector.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "api_version": {"type": ["string", "null"]}, "label_selector": {"type": ["string", "null"]}, "field_selector": {"type": ["string", "null"]}}, "required": ["kind"]}}},
+    {"type": "function", "function": {"name": "get_resource", "description": "Read a single Kubernetes resource by kind, namespace, and name.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}, "api_version": {"type": ["string", "null"]}}, "required": ["kind", "name"]}}},
+    {"type": "function", "function": {"name": "get_events", "description": "Read Kubernetes events, optionally scoped to a namespace or resource name.", "parameters": {"type": "object", "properties": {"namespace": {"type": ["string", "null"]}, "resource_name": {"type": ["string", "null"]}, "event_type": {"type": ["string", "null"]}}, "required": []}}},
+    {"type": "function", "function": {"name": "get_logs", "description": "Read container logs for a pod.", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "pod": {"type": "string"}, "container": {"type": ["string", "null"]}, "previous": {"type": "boolean"}, "tail_lines": {"type": "integer"}}, "required": ["namespace", "pod"]}}},
+    {"type": "function", "function": {"name": "get_owner", "description": "Resolve the ownerReferences of a resource up to the top-level owner.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}}, "required": ["kind", "name"]}}},
+    {"type": "function", "function": {"name": "get_owned_resources", "description": "Find all resources in the same namespace that have ownerReferences pointing to the named resource.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}}, "required": ["kind", "name"]}}},
+    {"type": "function", "function": {"name": "find_resources_by_labels", "description": "Find resources of a given kind whose labels match the provided label dictionary.", "parameters": {"type": "object", "properties": {"labels": {"type": "object"}, "namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}}, "required": ["labels"]}}},
+    {"type": "function", "function": {"name": "find_resources_by_selector", "description": "Find resources of a given kind matching a Kubernetes selector dictionary.", "parameters": {"type": "object", "properties": {"selector": {"type": "object"}, "namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}}, "required": ["selector"]}}},
+    {"type": "function", "function": {"name": "discover_api_resources", "description": "Return the read-safe resource kinds the tool layer supports.", "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {"name": "get_resource_usage", "description": "Request resource usage metrics if metrics-server is available.", "parameters": {"type": "object", "properties": {"namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}, "name": {"type": ["string", "null"]}}, "required": []}}},
+]
 
 
 class SREAgent:
-    """Bounded tool-using SRE agent backed by Ollama."""
+    """Bounded, hypothesis-driven, generic Kubernetes SRE investigator backed by Ollama."""
 
     def __init__(
         self,
@@ -143,9 +154,45 @@ class SREAgent:
         self.activities: list[str] = []
 
         self._progress("AI Reasoning")
+        messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": f"Incident: {self.incident_description}\n\nInvestigate by calling read tools. When you have enough evidence, return the diagnosis JSON. Start by discovering resources if needed, then follow relationships outward from the reported resource."},
+        ]
 
         for iteration in range(1, self.max_iterations + 1):
-            raw, llm_duration = self._call_ollama()
+            start = time.monotonic()
+            message = chat(messages, tools=OLLAMA_TOOLS)
+            llm_duration = time.monotonic() - start
+
+            tool_calls = message.get("tool_calls") or []
+            raw = message.get("content") or ""
+
+            self._trace_llm(iteration, raw, {"tool_calls": [tc.get("function", {}).get("name") for tc in tool_calls]}, None, llm_duration)
+
+            if tool_calls:
+                messages.append(message)
+                for tc in tool_calls:
+                    fn = tc.get("function") or {}
+                    tool_name = fn.get("name")
+                    arguments = fn.get("arguments") or {}
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except Exception:
+                            arguments = {}
+
+                    self.activities.append(f"Called {tool_name}")
+                    t0 = time.monotonic()
+                    result = self._execute_tool(tool_name, arguments)
+                    tool_duration = time.monotonic() - t0
+
+                    self._trace_tool(iteration, tool_name, arguments, result, tool_duration)
+                    self._maybe_progress(tool_name, arguments)
+                    observation = self._format_observation(iteration, tool_name, arguments, result)
+                    self.observations.append(observation)
+                    messages.append({"role": "tool", "name": tool_name, "content": self._compact(result)})
+                continue
+
             parsed, parse_error = self._parse_json(raw)
             self._trace_llm(iteration, raw, parsed, parse_error, llm_duration)
 
@@ -154,6 +201,8 @@ class SREAgent:
                     f"Turn {iteration}: LLM returned invalid JSON ({parse_error}). "
                     "Please return a valid JSON object."
                 )
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": "Return ONLY the structured diagnosis JSON now, or call a tool if more evidence is required."})
                 continue
 
             action = parsed.get("action")
@@ -163,7 +212,6 @@ class SREAgent:
                 if not isinstance(diagnosis, dict):
                     diagnosis = {
                         "status": "UNKNOWN",
-                        "incidentType": "unknown",
                         "rootCause": "Model returned a non-object diagnosis",
                         "explanation": json.dumps(parsed),
                         "confidence": 0.0,
@@ -173,196 +221,68 @@ class SREAgent:
                 else:
                     diagnosis = self._canonicalize_affected_resources(diagnosis)
                 self._progress("Root Cause Found")
+                diagnosis["investigationTrace"] = self.trace
                 return diagnosis
 
             if action == "tool_call":
+                # Support single tool_call JSON objects as a fallback when native tool_calls not used.
                 tool_name = parsed.get("tool")
                 arguments = parsed.get("arguments", {})
                 self.activities.append(f"Called {tool_name}")
-
                 t0 = time.monotonic()
                 result = self._execute_tool(tool_name, arguments)
                 tool_duration = time.monotonic() - t0
-
                 self._trace_tool(iteration, tool_name, arguments, result, tool_duration)
                 self._maybe_progress(tool_name, arguments)
-                self.observations.append(
-                    self._format_observation(iteration, tool_name, arguments, result)
-                )
+                observation = self._format_observation(iteration, tool_name, arguments, result)
+                self.observations.append(observation)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"Tool result: {observation}"})
                 continue
 
             self.observations.append(
                 f"Turn {iteration}: invalid action '{action}'. "
                 "Use 'tool_call' or 'diagnose'."
             )
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({"role": "user", "content": "Invalid action. Call a tool or return action='diagnose' JSON."})
 
-        # Exceeded iteration budget without a diagnosis; try a deterministic fallback.
-        self._progress("Root Cause Found")
-        diagnosis = self._fallback_image_pull_diagnosis()
-        if not diagnosis or not diagnosis.get("affectedResources"):
-            diagnosis = {
-                "status": "UNKNOWN",
-                "incidentType": "unknown",
-                "rootCause": (
-                    "Investigation reached the maximum number of tool iterations "
-                    "without a structured diagnosis."
-                ),
-                "explanation": "The agent exhausted the allowed tool-call budget.",
-                "confidence": 0.0,
-                "affectedResources": [],
-                "evidence": [
-                    {
-                        "source": "trace",
-                        "description": "Agent trace",
-                        "value": json.dumps(self.trace, default=str),
-                    }
-                ],
-            }
-        else:
-            diagnosis = self._canonicalize_affected_resources(diagnosis)
-        return diagnosis
+        # Tool budget exhausted; ask for a final synthesis without tools.
+        messages.append({"role": "user", "content": (
+            "Tool-call budget is exhausted. Do NOT call tools. Using only the evidence already collected, "
+            "return exactly one JSON object with action='diagnose'. If the reported symptom cannot be "
+            "confirmed or refuted, use status NEED_MORE_EVIDENCE. If no problem is visible, use NO_ISSUE."
+        )})
+        final_message = chat(messages, tools=None)
+        final_raw = final_message.get("content") or ""
+        final_parsed, final_error = self._parse_json(final_raw)
+        self._trace_llm(self.max_iterations + 1, final_raw, final_parsed, final_error, 0.0)
 
-    def _fallback_image_pull_diagnosis(self) -> dict:
-        """Build a deterministic ImagePullBackOff diagnosis from cluster state."""
-        bad_image = ""
-        image_namespace = ""
-        image_pod = ""
-        image_events: list[str] = []
+        if not final_error and isinstance(final_parsed, dict) and final_parsed.get("action") == "diagnose":
+            final_diag = final_parsed.get("diagnosis")
+            if isinstance(final_diag, dict):
+                self._progress("Root Cause Found")
+                final_diag = self._canonicalize_affected_resources(final_diag)
+                final_diag["investigationTrace"] = self.trace
+                return final_diag
 
-        # Try events first because they contain the exact failing image.
-        events_result = self.toolkit.get_events()
-        if events_result.get("success"):
-            for event in events_result.get("data", {}).get("items", []):
-                message = event.get("message") or ""
-                for match in re.finditer(
-                    r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+", message
-                ):
-                    img = match.group(0)
-                    reason = event.get("reason") or ""
-                    if any(
-                        r in reason
-                        for r in ("Failed", "ErrImagePull", "BackOff", "ImagePull")
-                    ):
-                        bad_image = img
-                        image_namespace = (
-                            event.get("metadata", {}).get("namespace") or ""
-                        )
-                        image_pod = (
-                            event.get("involvedObject", {}).get("name") or ""
-                        )
-                        image_events.append(message)
-                        break
-                if bad_image:
-                    break
-
-        # Fall back to scanning pod container statuses and pod spec.
-        if not bad_image:
-            pods_result = self.toolkit.get_resources("pod", None)
-            if pods_result.get("success"):
-                for pod in pods_result.get("data", {}).get("items", []):
-                    ns = pod.get("metadata", {}).get("namespace") or "default"
-                    statuses = (
-                        pod.get("status", {}).get("container_statuses")
-                        or pod.get("status", {}).get("containerStatuses", [])
-                    )
-                    if any(
-                        ((c.get("state") or {}).get("waiting") or {}).get("reason")
-                        in ("ImagePullBackOff", "ErrImagePull")
-                        for c in statuses
-                    ):
-                        for c in pod.get("spec", {}).get("containers", []):
-                            image = c.get("image")
-                            if image:
-                                bad_image = image
-                                image_namespace = ns
-                                image_pod = pod.get("metadata", {}).get("name")
-                                break
-                        break
-
-        if not bad_image:
-            return {}
-
-        deployment: dict | None = None
-        if image_namespace and image_pod:
-            pod_result = self.toolkit.get_resource(
-                "pod", image_namespace, image_pod
-            )
-            if pod_result.get("success"):
-                pod = pod_result.get("data", {}).get("resource", {})
-                deployment = self._deployment_owner_for_pod(pod)
-
-        if not deployment:
-            deps_result = self.toolkit.get_resources("deployment", None)
-            if deps_result.get("success"):
-                for dep in deps_result.get("data", {}).get("items", []):
-                    ns = dep.get("metadata", {}).get("namespace") or "default"
-                    name = dep.get("metadata", {}).get("name")
-                    if not name:
-                        continue
-                    containers = (
-                        dep.get("spec", {})
-                        .get("template", {})
-                        .get("spec", {})
-                        .get("containers", [])
-                    )
-                    if any(
-                        c.get("image") == bad_image for c in (containers or [])
-                    ):
-                        deployment = {"namespace": ns, "name": name}
-                        break
-
-        if not deployment:
-            return {}
-
-        evidence = [
-            {
-                "source": "resource",
-                "description": "Failing image detected",
-                "value": bad_image,
-            }
-        ]
-        if image_events:
-            evidence.append(
+        diagnosis = {
+            "status": "UNKNOWN",
+            "rootCause": "Investigation reached the maximum number of tool iterations without a structured diagnosis.",
+            "explanation": "The agent exhausted the allowed tool-call budget.",
+            "confidence": 0.0,
+            "affectedResources": [],
+            "evidence": [
                 {
-                    "source": "event",
-                    "description": "Kubernetes image pull event",
-                    "value": image_events[0],
+                    "source": "trace",
+                    "description": "Agent trace",
+                    "value": json.dumps(self.trace, default=str),
                 }
-            )
-
-        return {
-            "status": "DIAGNOSED",
-            "incidentType": "ImagePullBackOff",
-            "rootCause": (
-                f"The deployment is using an image that cannot be pulled: {bad_image}"
-            ),
-            "explanation": (
-                "Kubernetes events or pod statuses show repeated "
-                "ImagePullBackOff/ErrImagePull errors for this image."
-            ),
-            "confidence": 1.0,
-            "affectedResources": [
-                f"Deployment/{deployment['namespace']}/{deployment['name']}"
             ],
-            "evidence": evidence,
+            "investigationTrace": self.trace,
         }
-
-    def _call_ollama(self) -> tuple[str, float]:
-        prompt = self._build_prompt()
-        start = time.monotonic()
-        raw = generate(prompt, system=_SYSTEM_PROMPT)
-        duration = time.monotonic() - start
-        return raw, duration
-
-    def _build_prompt(self) -> str:
-        parts = [
-            f"Incident: {self.incident_description}",
-            "Available tool names: " + ", ".join(READ_TOOLS),
-            "Observation history:",
-            "\n\n".join(self.observations) if self.observations else "No observations yet.",
-            "Return a single JSON object for your next turn. Do not wrap it in markdown.",
-        ]
-        return "\n\n".join(parts)
+        self._progress("Root Cause Found")
+        return diagnosis
 
     def _parse_json(self, raw: str) -> tuple[dict | None, str | None]:
         text = raw.strip()
@@ -403,7 +323,9 @@ class SREAgent:
 
         tool = getattr(self.toolkit, tool_name)
         try:
-            inspect.signature(tool).bind(**arguments)
+            bound = inspect.signature(tool).bind(**arguments)
+            bound.apply_defaults()
+            arguments = bound.arguments
         except Exception as exc:
             return {
                 "success": False,
@@ -413,7 +335,7 @@ class SREAgent:
                 },
             }
 
-        call_key = (tool_name, json.dumps(arguments, sort_keys=True))
+        call_key = (tool_name, json.dumps(arguments, sort_keys=True, default=str))
         if call_key in self.seen_calls:
             return {
                 "success": False,
@@ -455,7 +377,7 @@ class SREAgent:
         self,
         iteration: int,
         raw: str,
-        parsed: dict | None,
+        parsed: Any,
         error: str | None,
         duration: float,
     ) -> None:
@@ -466,7 +388,7 @@ class SREAgent:
         }
         if error:
             entry["error"] = error
-        if parsed:
+        elif isinstance(parsed, dict):
             entry["action"] = parsed.get("action")
         self.trace.append(entry)
         logger.info(
@@ -505,204 +427,46 @@ class SREAgent:
 
     def _tool_to_step(self, tool_name: Any, arguments: Any) -> str | None:
         name = str(tool_name).lower()
-        kind = str(arguments.get("kind", "")).lower() if isinstance(arguments, dict) else ""
+        kind = ""
+        if isinstance(arguments, dict):
+            kind = str(arguments.get("kind", "")).lower()
 
-        if name == "get_resources" and kind == "pod":
-            return "Checking Pods"
-        if name == "get_logs":
-            return "Reading Logs"
+        if name == "list_resources":
+            return f"Listing {kind or 'resources'}" if kind else "Listing resources"
+        if name == "get_resource" and kind:
+            return f"Inspecting {kind}"
+        if name in ("get_owner", "get_owned_resources"):
+            return "Inspecting ownership"
+        if name in ("find_resources_by_labels", "find_resources_by_selector"):
+            return "Searching related resources"
         if name == "get_events":
-            return "Analyzing Events"
-        if name in ("get_owner", "get_rollout_status"):
-            return "Inspecting Deployments"
-        if name == "get_resource" and kind in (
-            "deployment",
-            "statefulset",
-            "daemonset",
-            "replicaset",
-        ):
-            return "Inspecting Deployments"
-        if name == "get_resource" and kind in ("service", "ingress", "networkpolicy"):
-            return "Checking Networking"
+            return "Analyzing events"
+        if name == "get_logs":
+            return "Reading logs"
+        if name == "discover_api_resources":
+            return "Discovering APIs"
         return None
 
     def _canonicalize_affected_resources(self, diagnosis: dict) -> dict:
-        """Replace placeholder affected resources with the real workload."""
+        """Normalize affectedResources and drop empty/unknown placeholders."""
         affected = diagnosis.get("affectedResources") or []
         if not isinstance(affected, list):
-            return diagnosis
-
-        def is_placeholder(value: str) -> bool:
-            text = value.lower()
-            return not value or "unknown" in text or "nginx-imagepullbackoff" in text
-
-        if not any(is_placeholder(v) for v in affected):
-            return diagnosis
-
-        incident = " ".join(
-            str(v)
-            for v in [
-                diagnosis.get("rootCause"),
-                diagnosis.get("explanation"),
-                *[
-                    e.get("value", "")
-                    for e in diagnosis.get("evidence", [])
-                    if isinstance(e, dict)
-                ],
-                *self.observations,
-            ]
-            if v
-        )
-        bad_image_match = re.search(
-            r"[a-z0-9][a-z0-9._/-]*:[a-zA-Z0-9_.-]+", incident
-        )
-        bad_image = bad_image_match.group(0) if bad_image_match else ""
-
-        pods = self.toolkit.get_resources("pod", None)
-        if pods.get("success"):
-            for pod in pods.get("data", {}).get("items", []):
-                statuses = (
-                    pod.get("status", {}).get("container_statuses")
-                    or pod.get("status", {}).get("containerStatuses", [])
-                )
-                if any(
-                    ((c.get("state") or {}).get("waiting") or {}).get("reason")
-                    in ("ImagePullBackOff", "ErrImagePull")
-                    for c in statuses
-                ):
-                    owner = self._deployment_owner_for_pod(pod)
-                    if owner:
-                        diagnosis["affectedResources"] = [
-                            f"Deployment/{owner['namespace']}/{owner['name']}"
-                        ]
-                        diagnosis["confidence"] = 1.0
-                        return diagnosis
-
-        if bad_image:
-            deps = self.toolkit.get_resources("deployment", None)
-            if deps.get("success"):
-                for dep in deps.get("data", {}).get("items", []):
-                    ns = dep.get("metadata", {}).get("namespace") or "default"
-                    name = dep.get("metadata", {}).get("name")
-                    if not name:
-                        continue
-                    containers = (
-                        dep.get("spec", {})
-                        .get("template", {})
-                        .get("spec", {})
-                        .get("containers", [])
-                    )
-                    if any(c.get("image") == bad_image for c in (containers or [])):
-                        diagnosis["affectedResources"] = [
-                            f"Deployment/{ns}/{name}"
-                        ]
-                        diagnosis["confidence"] = 1.0
-                        return diagnosis
-
+            affected = []
+        cleaned = []
+        for item in affected:
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if not item or "unknown" in item.lower():
+                continue
+            parts = item.split("/")
+            if len(parts) == 3:
+                cleaned.append(f"{parts[0].capitalize()}/{parts[1]}/{parts[2]}")
+            elif len(parts) == 2:
+                ns = diagnosis.get("namespace") or "default"
+                cleaned.append(f"{parts[0].capitalize()}/{ns}/{parts[1]}")
+        diagnosis["affectedResources"] = cleaned
         return diagnosis
-
-    def _deployment_owner_for_pod(self, pod: dict) -> dict | None:
-        refs = pod.get("metadata", {}).get("owner_references") or pod.get(
-            "metadata", {}
-        ).get("ownerReferences", [])
-        namespace = pod.get("metadata", {}).get("namespace") or "default"
-        for ref in refs:
-            kind = (ref.get("kind") or "").lower()
-            name = ref.get("name", "")
-            if kind == "deployment" and name:
-                return {"namespace": namespace, "name": name}
-            if kind == "replicaset" and name:
-                owner = self.toolkit.get_owner("replicaset", namespace, name)
-                if owner.get("success"):
-                    for o in owner.get("data", {}).get("owners", []):
-                        o_kind = (o.get("kind") or "").lower()
-                        o_name = o.get("metadata", {}).get("name") or o.get("name", "")
-                        o_ns = (
-                            o.get("metadata", {}).get("namespace")
-                            or namespace
-                        )
-                        if o_kind == "deployment" and o_name:
-                            return {"namespace": o_ns, "name": o_name}
-        return None
-
-    def _deterministic_diagnosis(self) -> dict | None:
-        """Try known, cheap diagnoses before asking the LLM.
-
-        Returns a complete diagnosis dict or NO_ISSUE dict.  If no known
-        incident is detected, returns a NO_ISSUE diagnosis (not None).
-        """
-        # 1. Known image pull failures.
-        image_pull = self._fallback_image_pull_diagnosis()
-        if image_pull:
-            return image_pull
-
-        # 2. Service selector mismatches: services with zero endpoints.
-        svc = self._service_without_endpoints()
-        if svc:
-            return {
-                "status": "DIAGNOSED",
-                "incidentType": "ServiceSelectorMismatch",
-                "rootCause": (
-                    f"Service {svc['namespace']}/{svc['name']} has no endpoints"
-                ),
-                "explanation": (
-                    "The service selector does not match any pod labels, so no "
-                    "endpoints were created."
-                ),
-                "confidence": 1.0,
-                "affectedResources": [
-                    f"Service/{svc['namespace']}/{svc['name']}"
-                ],
-                "evidence": [
-                    {
-                        "source": "resource",
-                        "description": "Service endpoints list",
-                        "value": f"{svc['namespace']}/{svc['name']}: {svc['subsets']}",
-                    }
-                ],
-            }
-
-        # 3. Nothing failing.
-        return {
-            "status": "NO_ISSUE",
-            "incidentType": "none",
-            "rootCause": "No active issues found",
-            "explanation": (
-                "No unhealthy pods, image pull failures, or empty service "
-                "endpoints were detected."
-            ),
-            "confidence": 1.0,
-            "affectedResources": [],
-            "evidence": [],
-        }
-
-    def _service_without_endpoints(self) -> dict | None:
-        """Return the first service whose endpoints object has no subsets."""
-        services = self.toolkit.get_resources("service", None)
-        endpoints = self.toolkit.get_resources("endpoints", None)
-        if not services.get("success") or not endpoints.get("success"):
-            return None
-
-        ep_map = {}
-        for ep in endpoints.get("data", {}).get("items", []):
-            meta = ep.get("metadata", {})
-            ns = meta.get("namespace") or "default"
-            name = meta.get("name")
-            if name:
-                ep_map[(ns, name)] = ep.get("subsets") or []
-
-        for svc in services.get("data", {}).get("items", []):
-            meta = svc.get("metadata", {})
-            ns = meta.get("namespace") or "default"
-            name = meta.get("name")
-            subsets = ep_map.get((ns, name))
-            if subsets is not None and not subsets:
-                return {
-                    "namespace": ns,
-                    "name": name,
-                    "subsets": subsets,
-                }
-        return None
 
     def _progress(self, step: str) -> None:
         if not self.progress_callback or step in self.progress_seen:
@@ -725,4 +489,5 @@ def normalize_diagnosis(diagnosis: dict) -> dict:
         "affected_resources": diagnosis.get("affectedResources")
         or diagnosis.get("affected_resources", []),
         "evidence": diagnosis.get("evidence", []),
+        "investigation_trace": diagnosis.get("investigationTrace") or [],
     }

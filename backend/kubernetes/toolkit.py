@@ -182,6 +182,32 @@ RESOURCE_MAP = {
         "patch": "patch_namespaced_ingress",
         "create": "create_namespaced_ingress",
     },
+    "networkpolicy": {
+        "api": client.NetworkingV1Api,
+        "namespaced": True,
+        "list_namespaced": "list_namespaced_network_policy",
+        "list_all": "list_network_policy_for_all_namespaces",
+        "read": "read_namespaced_network_policy",
+        "patch": "patch_namespaced_network_policy",
+        "create": "create_namespaced_network_policy",
+    },
+    "endpointslice": {
+        "api": client.DiscoveryV1Api,
+        "namespaced": True,
+        "list_namespaced": "list_namespaced_endpoint_slice",
+        "list_all": "list_endpoint_slice_for_all_namespaces",
+        "read": "read_namespaced_endpoint_slice",
+        "patch": "patch_namespaced_endpoint_slice",
+        "create": "create_namespaced_endpoint_slice",
+    },
+    "storageclass": {
+        "api": client.StorageV1Api,
+        "namespaced": False,
+        "list_all": "list_storage_class",
+        "read": "read_storage_class",
+        "patch": "patch_storage_class",
+        "create": "create_storage_class",
+    },
 }
 
 SCALABLE_KINDS = {"deployment", "statefulset", "replicaset", "replicationcontroller"}
@@ -519,6 +545,143 @@ class K8sToolkit:
         except Exception as exc:
             logger.exception("scale_workload failed")
             return self._err("scale_workload", "INTERNAL_ERROR", str(exc))
+
+
+    def list_resources(
+        self,
+        kind: str,
+        namespace: str | None = None,
+        api_version: str | None = None,
+        label_selector: str | None = None,
+        field_selector: str | None = None,
+    ) -> dict:
+        """Generic list for any registered Kubernetes resource kind."""
+        try:
+            meta = self._meta(kind)
+            method = meta["list_namespaced"] if (meta["namespaced"] and namespace) else meta["list_all"]
+            kwargs: dict[str, Any] = {}
+            if meta["namespaced"] and namespace:
+                kwargs["namespace"] = namespace
+            if label_selector:
+                kwargs["label_selector"] = label_selector
+            if field_selector:
+                kwargs["field_selector"] = field_selector
+            result = self._call(meta["api"], method, **kwargs)
+            items = [self._serialize(i) for i in (getattr(result, "items", []) or [])]
+            return self._ok("list_resources", {"kind": kind, "namespace": namespace, "items": items})
+        except ValueError as exc:
+            return self._err("list_resources", "UNSUPPORTED_KIND", str(exc))
+        except ApiException as exc:
+            return self._err("list_resources", "K8S_ERROR", exc.reason or str(exc), status=exc.status)
+        except Exception as exc:
+            logger.exception("list_resources failed")
+            return self._err("list_resources", "INTERNAL_ERROR", str(exc))
+
+    def get_resource(
+        self,
+        kind: str,
+        namespace: str | None,
+        name: str,
+        api_version: str | None = None,
+    ) -> dict:
+        """Generic read for any registered Kubernetes resource kind."""
+        return self._generic_get_resource(kind, namespace, name)
+
+    def _generic_get_resource(self, kind: str, namespace: str | None, name: str) -> dict:
+        try:
+            meta = self._meta(kind)
+            kwargs = self._namespaced_kwargs(meta, namespace, name)
+            result = self._call(meta["api"], meta["read"], **kwargs)
+            return self._ok("get_resource", {"kind": kind, "resource": self._serialize(result)})
+        except ValueError as exc:
+            return self._err("get_resource", "VALIDATION_ERROR", str(exc))
+        except ApiException as exc:
+            return self._err("get_resource", "K8S_ERROR", exc.reason or str(exc), status=exc.status)
+        except Exception as exc:
+            logger.exception("get_resource failed")
+            return self._err("get_resource", "INTERNAL_ERROR", str(exc))
+
+    @staticmethod
+    def _api_version_for_class(api_class: type) -> str:
+        mapping = {
+            client.CoreV1Api: "v1",
+            client.AppsV1Api: "apps/v1",
+            client.BatchV1Api: "batch/v1",
+            client.NetworkingV1Api: "networking.k8s.io/v1",
+            client.DiscoveryV1Api: "discovery.k8s.io/v1",
+            client.StorageV1Api: "storage.k8s.io/v1",
+        }
+        return mapping.get(api_class, "unknown")
+
+    def discover_api_resources(self) -> dict:
+        """Return the read-safe resource kinds the toolkit can query."""
+        resources = []
+        for key, meta in RESOURCE_MAP.items():
+            resources.append({
+                "apiVersion": self._api_version_for_class(meta["api"]),
+                "kind": key.capitalize(),
+                "namespaced": meta["namespaced"],
+                "verbs": ["get", "list"],
+            })
+        return self._ok("discover_api_resources", {"resources": resources})
+
+    def find_resources_by_labels(
+        self,
+        labels: dict,
+        namespace: str | None = None,
+        kind: str = "pod",
+    ) -> dict:
+        """Find resources of `kind` matching a label dictionary."""
+        if not isinstance(labels, dict):
+            return self._err("find_resources_by_labels", "VALIDATION_ERROR", "labels must be a dictionary")
+        selectors = ",".join(f"{k}={v}" for k, v in labels.items())
+        return self.list_resources(kind, namespace=namespace, label_selector=selectors)
+
+    def find_resources_by_selector(
+        self,
+        selector: dict,
+        namespace: str | None = None,
+        kind: str = "pod",
+    ) -> dict:
+        """Find resources of `kind` matching a Kubernetes selector dictionary."""
+        if not isinstance(selector, dict):
+            return self._err("find_resources_by_selector", "VALIDATION_ERROR", "selector must be a dictionary")
+        selectors = ",".join(f"{k}={v}" for k, v in selector.items())
+        return self.list_resources(kind, namespace=namespace, label_selector=selectors)
+
+    def get_owned_resources(
+        self,
+        kind: str,
+        namespace: str | None,
+        name: str,
+    ) -> dict:
+        """Find resources owned by the named resource via ownerReferences."""
+        try:
+            meta = self._meta(kind)
+            if meta["namespaced"] and not namespace:
+                return self._err("get_owned_resources", "VALIDATION_ERROR", f"{kind} requires a namespace")
+            key = self._kind_key(kind)
+            target_namespace = namespace or "default"
+            owned = []
+            for child_kind, child_meta in RESOURCE_MAP.items():
+                if not child_meta["namespaced"]:
+                    continue
+                result = self.list_resources(child_kind, namespace=target_namespace)
+                if not result.get("success"):
+                    continue
+                for item in result["data"].get("items", []):
+                    refs = item.get("metadata", {}).get("owner_references") or item.get("metadata", {}).get("ownerReferences") or []
+                    for ref in refs:
+                        if (ref.get("kind") or "").lower() == key and ref.get("name") == name:
+                            owned.append({"kind": child_kind, "namespace": target_namespace, "name": item.get("metadata", {}).get("name")})
+            return self._ok("get_owned_resources", {"kind": kind, "namespace": namespace, "name": name, "owned": owned})
+        except Exception as exc:
+            logger.exception("get_owned_resources failed")
+            return self._err("get_owned_resources", "INTERNAL_ERROR", str(exc))
+
+    def get_resource_usage(self, namespace: str | None = None, kind: str = "pod", name: str | None = None) -> dict:
+        """Stub for resource usage metrics; requires metrics-server."""
+        return self._ok("get_resource_usage", {"available": False, "note": "Metrics-server/Prometheus not integrated yet."})
 
 
 def kind_title(method_name: str) -> str:
