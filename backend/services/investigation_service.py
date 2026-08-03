@@ -13,6 +13,35 @@ DEFAULT_INCIDENT = (
 )
 
 
+def _enrich_affected_with_owners(diagnosis: dict, toolkit: K8sToolkit) -> None:
+    """Add controller owner IDs (ReplicaSet, Deployment, etc.) to affected resources."""
+    affected = diagnosis.get("affected_resources") or diagnosis.get("affectedResources") or []
+    if not isinstance(affected, list):
+        return
+
+    extras: set[str] = set()
+    for ar in affected:
+        if not isinstance(ar, str):
+            continue
+        parts = ar.split("/")
+        if len(parts) != 3:
+            continue
+        kind, namespace, name = parts
+        owner_result = toolkit.get_owner(kind, namespace, name)
+        if not owner_result.get("success"):
+            continue
+        for owner in owner_result.get("data", {}).get("owners", []):
+            okind = (owner.get("kind") or "").lower()
+            meta = owner.get("metadata") or {}
+            oname = meta.get("name") or owner.get("name", "")
+            ons = meta.get("namespace") or namespace
+            if okind and oname:
+                extras.add(f"{okind}/{ons}/{oname}")
+
+    if extras:
+        diagnosis["affected_resources"] = list(set(affected) | extras)
+
+
 def run_investigation(
     progress_callback: Callable[[str], None] | None = None,
     context: str | None = None,
@@ -47,6 +76,7 @@ def run_investigation(
         progress_callback=progress_callback,
     )
 
+    _enrich_affected_with_owners(diagnosis, toolkit)
     remediation_plan = RemediationPlanner(context=context).plan(diagnosis)
 
     return {
