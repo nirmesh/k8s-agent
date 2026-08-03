@@ -24,7 +24,7 @@ Do not execute anything.
 Only use values that are explicitly present in the supplied diagnosis/evidence, current manifest, related live resources, or user-provided input.
 Never invent or infer a replacement value merely because it seems plausible.
 You may select an existing value that is already present in the supplied evidence, current manifest, related live resources, or user input (for example, using a Pod or Workload label value to fix a Service selector).
-If the intended value cannot be determined from the supplied grounding, return NEED_USER_INPUT.
+If the intended value cannot be determined from the supplied grounding, prefer a safe remediation that does not require a user-provided value, such as removing the offending configuration or rolling back to an observed previous state. Do not return NEED_USER_INPUT. Return NO_SAFE_REMEDIATION only if no reversible remediation exists.
 Prefer reversible changes.
 Return exactly one JSON remediation plan.
 
@@ -49,7 +49,7 @@ The `verification` field must describe observable success criteria using a gener
 
 Return exactly one JSON object with no markdown or commentary:
 {
-  "status": "READY | NEED_USER_INPUT | NO_SAFE_REMEDIATION",
+  "status": "READY | NO_SAFE_REMEDIATION",
   "summary": "<human-readable one-line summary>",
   "question": "<what the user needs to provide; omit for READY/NO_SAFE_REMEDIATION>",
   "risk": "LOW | MEDIUM | HIGH | CRITICAL",
@@ -257,7 +257,13 @@ class RemediationPlanner:
             return _fallback("NO_SAFE_REMEDIATION", "Planner did not return a JSON object.", target=default_target)
 
         status = plan.get("status")
-        if status in {"NEED_USER_INPUT", "NO_SAFE_REMEDIATION"}:
+        if status == "NEED_USER_INPUT":
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
+                "Planner asked for user input, but only autonomous remediations are allowed. Propose a safe remediation based on evidence or report NO_SAFE_REMEDIATION.",
+                target=default_target,
+            )
+        if status == "NO_SAFE_REMEDIATION":
             return plan
 
         if status != "READY":
@@ -306,19 +312,19 @@ class RemediationPlanner:
             target = default_target
 
         if not _same_target(target, default_target):
-            return _need_input(
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
                 "Planner proposed a different target than the evidence-backed affected resource.",
-                default_target,
-                "Confirm the exact Kubernetes resource that should be changed.",
+                target=default_target,
             )
 
         unsupported = self._unsupported_mutation_values(tool, arguments, plan, grounding)
         if unsupported:
             rendered = ", ".join(f"{path}={value!r}" for path, value in unsupported[:5])
-            return _need_input(
+            return _fallback(
+                "NO_SAFE_REMEDIATION",
                 f"Blocked remediation because proposed values are not supported by current investigation evidence: {rendered}",
-                default_target,
-                "Provide or collect evidence for the intended replacement value before applying a change.",
+                target=default_target,
             )
 
         if not isinstance(plan.get("changes"), list):
@@ -356,11 +362,6 @@ class RemediationPlanner:
                 candidates.append(("replicas", arguments.get("replicas")))
         # restart_workload and rollback_workload do not introduce arbitrary
         # configuration values, so target validation is sufficient here.
-
-        # changes.after is also checked because UI/executor code may rely on it.
-        for index, change in enumerate(plan.get("changes") or []):
-            if isinstance(change, dict) and "after" in change:
-                candidates.append((f"changes[{index}].after", change.get("after")))
 
         unsupported: list[tuple[str, Any]] = []
         for path, value in candidates:

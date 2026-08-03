@@ -438,13 +438,18 @@ class K8sToolkit:
     def _dry_run_kwarg(self, dry_run: bool):
         return "All" if dry_run else None
 
-    def patch_resource(self, kind: str, namespace: str | None, name: str, patch: dict, dry_run: bool = False) -> dict:
+    def patch_resource(self, kind: str, namespace: str | None, name: str, patch: dict | list, dry_run: bool = False) -> dict:
         try:
             meta = self._meta(kind)
             kwargs = self._namespaced_kwargs(meta, namespace, name)
             kwargs["body"] = patch
             kwargs["dry_run"] = self._dry_run_kwarg(dry_run)
-            kwargs["_content_type"] = "application/merge-patch+json"
+            if isinstance(patch, list):
+                kwargs["_content_type"] = "application/json-patch+json"
+            elif isinstance(patch, dict):
+                kwargs["_content_type"] = "application/strategic-merge-patch+json"
+            else:
+                kwargs["_content_type"] = "application/merge-patch+json"
             result = self._call(meta["api"], meta["patch"], **kwargs)
             return self._ok("patch_resource", {"kind": kind, "name": name, "dry_run": dry_run, "resource": self._serialize(result)})
         except ValueError as exc:

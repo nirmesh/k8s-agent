@@ -156,7 +156,7 @@ export default function Dashboard() {
             <h1 className="bg-gradient-to-r from-cyan-400 to-blue-500 bg-clip-text text-2xl font-bold text-transparent md:text-3xl">
               AI Kubernetes Agent
             </h1>
-            <span className="text-xs italic text-slate-400">no greping at 2 am</span>
+            <span className="text-xs italic text-slate-400">No grepping at 2 am</span>
           </div>
           <div className="flex items-center gap-2">
             <ThemeToggle />
@@ -215,13 +215,18 @@ export default function Dashboard() {
             <h2 className="mb-4 text-lg font-semibold text-slate-100">Investigation Status</h2>
             <ul className="space-y-3">
               {(() => {
-                const completed = new Set(current.steps.map((s) => s.name));
+                const reported = new Set(current.steps.map((s) => s.name));
+                const highestCompleted = ALL_STEPS.reduce((max, step, idx) =>
+                  reported.has(step) ? idx : max, -1
+                );
+                const completedIndex = investigating ? highestCompleted : ALL_STEPS.length - 1;
+                const completed = new Set(ALL_STEPS.slice(0, completedIndex + 1));
                 const activeIndex = investigating
-                  ? ALL_STEPS.findIndex((s) => !completed.has(s))
+                  ? Math.min(completedIndex + 1, ALL_STEPS.length - 1)
                   : -1;
                 return ALL_STEPS.map((step, index) => {
                   const isCompleted = completed.has(step);
-                  const isActive = index === activeIndex;
+                  const isActive = index === activeIndex && !isCompleted;
                   return (
                     <li
                       key={step}

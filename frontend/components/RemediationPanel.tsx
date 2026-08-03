@@ -58,7 +58,6 @@ function CheckBadge({ status }: { status: "PASS" | "WARN" | "FAIL" | string }) {
 }
 
 export default function RemediationPanel({ remediationId, investigation, onUpdate }: RemediationPanelProps) {
-  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
@@ -80,22 +79,6 @@ export default function RemediationPanel({ remediationId, investigation, onUpdat
       setAudit(r.data.audit);
       setShowAudit(true);
     } catch (err: any) {
-    }
-  }
-
-  async function handlePreview(e: React.FormEvent) {
-    e.preventDefault();
-    if (!remediationId) return;
-    setLoading(true);
-    try {
-      await apiClient.post(`/remediations/${remediationId}/preview`, {
-        user_input: { image: input },
-      });
-      await refresh();
-    } catch (err: any) {
-    } finally {
-      setLoading(false);
-      setInput("");
     }
   }
 
@@ -146,29 +129,9 @@ export default function RemediationPanel({ remediationId, investigation, onUpdat
       </h3>
 
       {status === "NEED_USER_INPUT" && (
-        <form onSubmit={handlePreview} className="space-y-3">
-          <p className="text-sm text-slate-300">
-            {plan?.summary || "Additional information is required to generate a remediation plan."}
-          </p>
-          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500">
-            {plan?.question || "Replacement image"}
-          </label>
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="nginx:1.29"
-            className="w-full rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-slate-100 focus:border-cyan-500 focus:outline-none"
-            required
-          />
-          <button
-            type="submit"
-            disabled={loading || !input.trim()}
-            className="rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg transition-all hover:from-cyan-400 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {loading ? "Generating..." : "Generate Preview"}
-          </button>
-        </form>
+        <div className="rounded-lg border border-amber-500/30 bg-amber-900/20 p-3 text-amber-200">
+          {plan?.summary || "No safe automated remediation could be determined from the current evidence."}
+        </div>
       )}
 
       {(status === "AWAITING_APPROVAL" || status === "READY") && plan?.status === "READY" && (

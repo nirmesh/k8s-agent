@@ -434,20 +434,38 @@ class SREAgent:
         if isinstance(arguments, dict):
             kind = str(arguments.get("kind", "")).lower()
 
-        if name == "list_resources":
-            return f"Listing {kind or 'resources'}" if kind else "Listing resources"
-        if name == "get_resource" and kind:
-            return f"Inspecting {kind}"
-        if name in ("get_owner", "get_owned_resources"):
-            return "Inspecting ownership"
-        if name in ("find_resources_by_labels", "find_resources_by_selector"):
-            return "Searching related resources"
-        if name == "get_events":
-            return "Analyzing events"
         if name == "get_logs":
-            return "Reading logs"
-        if name == "discover_api_resources":
-            return "Discovering APIs"
+            return "Reading Logs"
+        if name == "get_events":
+            return "Analyzing Events"
+
+        # Pod-level discovery / inspection.
+        if kind == "pod" and name in (
+            "list_resources",
+            "get_resource",
+            "find_resources_by_labels",
+            "find_resources_by_selector",
+        ):
+            return "Checking Pods"
+
+        # Workload-level discovery / inspection.
+        if kind in ("deployment", "replicaset", "statefulset", "daemonset") and name in (
+            "list_resources",
+            "get_resource",
+            "find_resources_by_labels",
+            "find_resources_by_selector",
+        ):
+            return "Inspecting Deployments"
+
+        # Networking-level discovery / inspection.
+        if kind in ("service", "endpoints", "endpointslice", "ingress", "networkpolicy") and name in (
+            "list_resources",
+            "get_resource",
+            "find_resources_by_labels",
+            "find_resources_by_selector",
+        ):
+            return "Checking Networking"
+
         return None
 
     def _canonicalize_affected_resources(self, diagnosis: dict) -> dict:
