@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 
 import yaml
@@ -242,6 +243,10 @@ class PolicyEngine:
         return f"{kind}/{namespace}/{name}".lower()
 
     def _path_matches(self, declared: str, actual: str) -> bool:
+        # Convert JSONPath bracket selectors (e.g. containers[0] or
+        # containers[?(@.name=='nginx')]) to wildcards so they match flattened
+        # numeric indices.
+        declared = re.sub(r"\[[^\]]*\]", "[*]", declared)
         declared_parts = (
             declared.lower().strip("/").replace("[", ".").replace("]", "").split(".")
         )
