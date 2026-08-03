@@ -11,6 +11,27 @@ docker compose up --build
 
 ---
 
+## Iteration 3 - Metrics and Evidence Providers
+
+The agent now reasons over both Kubernetes and Prometheus through an evidence
+provider framework:
+
+- `backend/evidence/` - `Evidence` model and `EvidenceGraph`
+- `backend/providers/` - `ProviderRegistry`, `KubernetesProvider`, `PrometheusProvider`
+- `backend/observability/` - `PrometheusClient` and `alertmanager` parser
+- `backend/ai/sre_agent.py` - routes all tool calls through the registry
+- `frontend/components/MetricsPanel.tsx` - native metrics UI
+
+Tests:
+
+```bash
+docker compose run --rm backend python3 -B -m pytest tests -q
+```
+
+See `ARCHITECTURE.md` for design details and `docs/MIGRATION.md` for migration notes.
+
+---
+
 # AI Kubernetes Troubleshooting Agent - High Level Design (HLD)
 
 ## Goal
