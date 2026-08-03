@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import apiClient from "@/services/api";
+import MetricsPanel from "@/components/MetricsPanel";
 import RemediationPanel from "@/components/RemediationPanel";
 import ThemeToggle from "@/components/ThemeToggle";
 import type { Cluster, Investigation } from "@/types";
@@ -333,6 +334,8 @@ export default function Dashboard() {
             </ul>
           )}
         </section>
+
+        <MetricsPanel />
       </div>
     </div>
   );
