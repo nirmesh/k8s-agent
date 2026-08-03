@@ -240,7 +240,7 @@ class PolicyEngine:
         return f"{kind}/{namespace}/{name}".lower()
 
     def _path_matches(self, declared: str, actual: str) -> bool:
-        declared_parts = declared.lower().replace("[", ".").replace("]", "").split(".")
+        declared_parts = declared.lower().strip("/").replace("[", ".").replace("]", "").split(".")
         actual_parts = actual.lower().split(".")
         for dp, ap in zip(declared_parts, actual_parts):
             if dp == "*":
