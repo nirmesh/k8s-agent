@@ -436,7 +436,7 @@ class K8sToolkit:
         return {}
 
     def _dry_run_kwarg(self, dry_run: bool):
-        return "All" if dry_run else None
+        return ["All"] if dry_run else None
 
     def patch_resource(self, kind: str, namespace: str | None, name: str, patch: dict | list, dry_run: bool = False) -> dict:
         try:

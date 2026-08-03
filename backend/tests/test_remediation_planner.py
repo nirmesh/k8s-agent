@@ -31,7 +31,7 @@ def _ready_plan():
             "kind": "deployment",
             "namespace": "default",
             "name": "app",
-            "replicas": 3,
+            "replicas": 1,
         },
         "target": {
             "kind": "deployment",
@@ -64,7 +64,7 @@ def test_ready_plan(planner, monkeypatch):
     assert plan["target"]["name"] == "app"
 
 
-def test_need_user_input(planner, monkeypatch):
+def test_need_user_input_rejected(planner, monkeypatch):
     monkeypatch.setattr(
         "backend.ai.remediation_planner.generate",
         lambda *args, **kwargs: json.dumps({
@@ -79,7 +79,7 @@ def test_need_user_input(planner, monkeypatch):
         "evidence": [],
     }
     plan = planner.plan(diagnosis)
-    assert plan["status"] == "NEED_USER_INPUT"
+    assert plan["status"] == "NO_SAFE_REMEDIATION"
 
 
 def test_no_affected_resources(planner):

@@ -177,6 +177,7 @@ def _make_doc(status="AWAITING_APPROVAL", updated_at=None):
                 "replicas": 2,
             },
             "target": {"kind": "deployment", "namespace": "default", "name": "app"},
+            "verification": {"type": "rollout_status", "expected": "ready"},
         },
     }
 
@@ -222,7 +223,17 @@ def test_execute_success(fake_db_factory):
     assert updated["verification_result"]["checks"]
 
 
-def test_execute_verification_failure_marks_failed_with_rollback_plan(fake_db_factory):
+def test_execute_verification_failure_marks_failed_with_rollback_plan(fake_db_factory, monkeypatch):
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    counter = {"ticks": 0}
+
+    def fake_now():
+        counter["ticks"] += 5
+        return start + timedelta(seconds=counter["ticks"])
+
+    monkeypatch.setattr("backend.services.remediation_service._now", fake_now)
+    monkeypatch.setattr("backend.services.remediation_service.time.sleep", lambda *_: None)
+
     db, doc = fake_db_factory(toolkit_cls=FailingVerifyToolkit)
     remediation_id = str(doc["_id"])
     remediation_service.execute_remediation(remediation_id)
