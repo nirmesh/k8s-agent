@@ -23,10 +23,15 @@ _READ_TOOLS_SCHEMA = [
 class KubernetesProvider(EvidenceProvider):
     """Provider that wraps the existing K8sToolkit for Kubernetes evidence and tools."""
 
-    def __init__(self, context: str | None = None, config_path: str | None = None):
+    def __init__(
+        self,
+        toolkit: K8sToolkit | None = None,
+        context: str | None = None,
+        config_path: str | None = None,
+    ):
+        self._toolkit = toolkit
         self.context = context
         self.config_path = config_path
-        self._toolkit: K8sToolkit | None = None
 
     @property
     def name(self) -> str:

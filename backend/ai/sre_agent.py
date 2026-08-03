@@ -1,4 +1,3 @@
-import inspect
 import json
 import time
 from collections.abc import Callable
@@ -6,7 +5,9 @@ from typing import Any
 
 from backend.ai.llm_client import chat
 from backend.core.logging import logger
+from backend.evidence.model import Evidence
 from backend.kubernetes.toolkit import K8sToolkit
+from backend.providers import KubernetesProvider, PrometheusProvider, ProviderRegistry
 
 MAX_ITERATIONS = 10
 MAX_OBSERVATION_CHARS = 12000
@@ -15,19 +16,6 @@ DEFAULT_INCIDENT = (
     "Investigate the Kubernetes cluster for current incidents, unhealthy resources, "
     "failing workloads, or any other anomalous state. Determine the root cause."
 )
-
-READ_TOOLS = [
-    "list_resources",
-    "get_resource",
-    "get_events",
-    "get_logs",
-    "get_owner",
-    "get_owned_resources",
-    "find_resources_by_labels",
-    "find_resources_by_selector",
-    "discover_api_resources",
-    "get_resource_usage",
-]
 
 _SYSTEM_PROMPT = """You are a generic Kubernetes SRE investigator.
 
@@ -110,20 +98,6 @@ To finish with a diagnosis, return exactly one JSON object:
 Do not wrap the diagnosis in markdown. Do not include any commentary outside the JSON.
 """
 
-OLLAMA_TOOLS = [
-    {"type": "function", "function": {"name": "list_resources", "description": "List Kubernetes resources of a kind, optionally filtered by namespace, label selector, or field selector.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "api_version": {"type": ["string", "null"]}, "label_selector": {"type": ["string", "null"]}, "field_selector": {"type": ["string", "null"]}}, "required": ["kind"]}}},
-    {"type": "function", "function": {"name": "get_resource", "description": "Read a single Kubernetes resource by kind, namespace, and name.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}, "api_version": {"type": ["string", "null"]}}, "required": ["kind", "name"]}}},
-    {"type": "function", "function": {"name": "get_events", "description": "Read Kubernetes events, optionally scoped to a namespace or resource name.", "parameters": {"type": "object", "properties": {"namespace": {"type": ["string", "null"]}, "resource_name": {"type": ["string", "null"]}, "event_type": {"type": ["string", "null"]}}, "required": []}}},
-    {"type": "function", "function": {"name": "get_logs", "description": "Read container logs for a pod.", "parameters": {"type": "object", "properties": {"namespace": {"type": "string"}, "pod": {"type": "string"}, "container": {"type": ["string", "null"]}, "previous": {"type": "boolean"}, "tail_lines": {"type": "integer"}}, "required": ["namespace", "pod"]}}},
-    {"type": "function", "function": {"name": "get_owner", "description": "Resolve the ownerReferences of a resource up to the top-level owner.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}}, "required": ["kind", "name"]}}},
-    {"type": "function", "function": {"name": "get_owned_resources", "description": "Find all resources in the same namespace that have ownerReferences pointing to the named resource.", "parameters": {"type": "object", "properties": {"kind": {"type": "string"}, "namespace": {"type": ["string", "null"]}, "name": {"type": "string"}}, "required": ["kind", "name"]}}},
-    {"type": "function", "function": {"name": "find_resources_by_labels", "description": "Find resources of a given kind whose labels match the provided label dictionary.", "parameters": {"type": "object", "properties": {"labels": {"type": "object"}, "namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}}, "required": ["labels"]}}},
-    {"type": "function", "function": {"name": "find_resources_by_selector", "description": "Find resources of a given kind matching a Kubernetes selector dictionary.", "parameters": {"type": "object", "properties": {"selector": {"type": "object"}, "namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}}, "required": ["selector"]}}},
-    {"type": "function", "function": {"name": "discover_api_resources", "description": "Return the read-safe resource kinds the tool layer supports.", "parameters": {"type": "object", "properties": {}}}},
-    {"type": "function", "function": {"name": "get_resource_usage", "description": "Request resource usage metrics if metrics-server is available.", "parameters": {"type": "object", "properties": {"namespace": {"type": ["string", "null"]}, "kind": {"type": "string"}, "name": {"type": ["string", "null"]}}, "required": []}}},
-]
-
-
 class SREAgent:
     """Bounded, hypothesis-driven, generic Kubernetes SRE investigator backed by Ollama."""
 
@@ -142,6 +116,11 @@ class SREAgent:
             config_path=config_path,
             _api_client=_api_client,
         )
+        self.registry = ProviderRegistry()
+        self.registry.register(KubernetesProvider(toolkit=self.toolkit))
+        self.registry.register(PrometheusProvider())
+        self._tool_schemas = self.registry.tools()
+        self._tool_names = self.registry.tool_names()
 
     def run(
         self,
@@ -164,7 +143,7 @@ class SREAgent:
 
         for iteration in range(1, self.max_iterations + 1):
             start = time.monotonic()
-            message = chat(messages, tools=OLLAMA_TOOLS)
+            message = chat(messages, tools=self._tool_schemas)
             llm_duration = time.monotonic() - start
 
             tool_calls = message.get("tool_calls") or []
@@ -305,61 +284,80 @@ class SREAgent:
         except Exception as exc:
             return None, f"{exc}"
 
-    def _execute_tool(self, tool_name: Any, arguments: Any) -> dict:
-        if tool_name not in READ_TOOLS:
-            return {
-                "success": False,
-                "error": {
-                    "code": "INVALID_TOOL",
-                    "message": f"Tool '{tool_name}' is not available. Use one of {READ_TOOLS}.",
-                },
-            }
-
+    def _execute_tool(self, tool_name: Any, arguments: Any) -> Evidence:
         if not isinstance(arguments, dict):
-            return {
-                "success": False,
-                "error": {
-                    "code": "INVALID_ARGUMENTS",
-                    "message": "arguments must be a JSON object of keyword arguments.",
+            return Evidence(
+                provider="sre_agent",
+                type="tool_result",
+                resource=str(tool_name),
+                payload={
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": {
+                        "success": False,
+                        "error": {
+                            "code": "INVALID_ARGUMENTS",
+                            "message": "arguments must be a JSON object of keyword arguments.",
+                        },
+                    },
                 },
-            }
+            )
 
-        tool = getattr(self.toolkit, tool_name)
-        try:
-            bound = inspect.signature(tool).bind(**arguments)
-            bound.apply_defaults()
-            arguments = bound.arguments
-        except Exception as exc:
-            return {
-                "success": False,
-                "error": {
-                    "code": "INVALID_ARGUMENTS",
-                    "message": str(exc),
+        if tool_name not in self._tool_names:
+            return Evidence(
+                provider="sre_agent",
+                type="tool_result",
+                resource=str(tool_name),
+                payload={
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": {
+                        "success": False,
+                        "error": {
+                            "code": "INVALID_TOOL",
+                            "message": f"Tool '{tool_name}' is not available.",
+                        },
+                    },
                 },
-            }
+            )
 
         call_key = (tool_name, json.dumps(arguments, sort_keys=True, default=str))
         if call_key in self.seen_calls:
-            return {
-                "success": False,
-                "error": {
-                    "code": "REPEATED_CALL",
-                    "message": "This exact tool call was already made.",
+            return Evidence(
+                provider="sre_agent",
+                type="tool_result",
+                resource=str(tool_name),
+                payload={
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": {
+                        "success": False,
+                        "error": {
+                            "code": "REPEATED_CALL",
+                            "message": "This exact tool call was already made.",
+                        },
+                    },
                 },
-            }
+            )
         self.seen_calls.add(call_key)
 
         try:
-            return tool(**arguments)
+            return self.registry.execute_tool(tool_name, **arguments)
         except Exception as exc:
             logger.exception("SRE agent tool execution failed")
-            return {
-                "success": False,
-                "error": {
-                    "code": "TOOL_ERROR",
-                    "message": str(exc),
+            return Evidence(
+                provider="sre_agent",
+                type="tool_result",
+                resource=str(tool_name),
+                payload={
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "result": {
+                        "success": False,
+                        "error": {"code": "TOOL_ERROR", "message": str(exc)},
+                    },
                 },
-            }
+            )
 
     def _format_observation(
         self, iteration: int, tool_name: Any, arguments: Any, result: dict
@@ -371,10 +369,19 @@ class SREAgent:
         )
 
     def _compact(self, value: Any) -> str:
+        if isinstance(value, Evidence):
+            value = value.payload.get("result", value.payload)
         text = json.dumps(value, default=str)
         if len(text) > MAX_OBSERVATION_CHARS:
             return text[:MAX_OBSERVATION_CHARS] + " ... [truncated]"
         return text
+
+    def _result_success(self, result: Any) -> bool:
+        if isinstance(result, Evidence):
+            result = result.payload.get("result")
+        if isinstance(result, dict):
+            return result.get("success", False)
+        return True
 
     def _trace_llm(
         self,
@@ -412,7 +419,7 @@ class SREAgent:
             "type": "tool",
             "tool": tool_name,
             "arguments": arguments,
-            "success": result.get("success") if isinstance(result, dict) else False,
+            "success": self._result_success(result),
             "duration": duration,
         }
         self.trace.append(entry)
