@@ -122,7 +122,9 @@ class PolicyEngine:
                         "No 'changes' declared for patch_resource"
                     )
                 else:
-                    patch_paths = _flatten_paths(patch)
+                    patch_paths = [
+                        p for p in _flatten_paths(patch) if not _is_merge_key_path(p)
+                    ]
                     for path in patch_paths:
                         if not any(
                             self._path_matches(declared_path, path)
@@ -240,14 +242,37 @@ class PolicyEngine:
         return f"{kind}/{namespace}/{name}".lower()
 
     def _path_matches(self, declared: str, actual: str) -> bool:
-        declared_parts = declared.lower().strip("/").replace("[", ".").replace("]", "").split(".")
+        declared_parts = (
+            declared.lower().strip("/").replace("[", ".").replace("]", "").split(".")
+        )
         actual_parts = actual.lower().split(".")
-        for dp, ap in zip(declared_parts, actual_parts):
-            if dp == "*":
-                continue
-            if dp != ap:
+        di = ai = 0
+        while di < len(declared_parts):
+            if ai >= len(actual_parts):
                 return False
+            dp = declared_parts[di]
+            ap = actual_parts[ai]
+            if dp == "*" or dp == ap:
+                di += 1
+                ai += 1
+                continue
+            # Declared may omit list indices (e.g., containers.readinessProbe) while
+            # the actual flattened patch includes them (containers.0.readinessProbe).
+            if ap.isdigit():
+                ai += 1
+                continue
+            return False
         return True
+
+
+def _is_merge_key_path(path: str) -> bool:
+    """Return True for list merge keys such as containers.0.name.
+
+    These keys are not themselves intended mutations; they identify the
+    list element being patched.
+    """
+    parts = path.lower().split(".")
+    return len(parts) >= 3 and parts[-1] == "name" and parts[-2].isdigit()
 
 
 def _flatten_paths(obj: Any, prefix: str = "") -> list[str]:
