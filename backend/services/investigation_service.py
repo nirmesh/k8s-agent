@@ -39,7 +39,10 @@ def _enrich_affected_with_owners(diagnosis: dict, toolkit: K8sToolkit) -> None:
                 extras.add(f"{okind}/{ons}/{oname}")
 
     if extras:
-        diagnosis["affected_resources"] = list(set(affected) | extras)
+        # Put controller owners first so the remediation planner targets the
+        # workload (Deployment, StatefulSet, etc.) rather than an individual Pod.
+        kept = [a for a in affected if a not in extras]
+        diagnosis["affected_resources"] = list(extras) + kept
 
 
 def run_investigation(
