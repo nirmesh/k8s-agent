@@ -16,5 +16,7 @@ class Settings(BaseSettings):
     mongodb_url: str = "mongodb://localhost:27017"
     mongodb_database: str = "ai_kubernetes_agent"
 
+    prometheus_url: str = "http://localhost:9090"
+
 
 settings = Settings()
