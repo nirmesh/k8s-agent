@@ -45,20 +45,20 @@ class FalcoAdapter(SecurityProvider):
 
     def collect(self, query: dict[str, Any] | None = None) -> list[SecurityEvidence]:
         events = self._load(query)
+        requested_category = (query or {}).get("category")
+        requested_resource = (query or {}).get("resource")
         evidence: list[SecurityEvidence] = []
         for event in events:
-            fields = event.get("output_fields") or {}
-            resource_parts = []
-            for key in ("pod.name", "k8s.pod.name", "proc.name", "fd.name"):
-                val = fields.get(key)
-                if val:
-                    resource_parts.append(str(val))
-                    break
-            resource = resource_parts[0] if resource_parts else "cluster/-/-"
+            category = self._event_category(event)
+            if requested_category and category != requested_category.lower():
+                continue
+            resource = self._event_resource(event)
+            if requested_resource and requested_resource not in resource:
+                continue
             rule = event.get("rule", "unknown")
             description = event.get("output", "")
             finding = SecurityFinding(
-                category="threat",
+                category=category,
                 resource=resource,
                 finding=rule,
                 description=description,
@@ -80,6 +80,35 @@ class FalcoAdapter(SecurityProvider):
                 )
             )
         return evidence
+
+    def _event_resource(self, event: dict[str, Any]) -> str:
+        fields = event.get("output_fields") or {}
+        for key in ("pod.name", "k8s.pod.name", "proc.name", "fd.name"):
+            val = fields.get(key)
+            if val:
+                return str(val)
+        return "cluster/-/-"
+
+    def _event_category(self, event: dict[str, Any]) -> str:
+        rule = str(event.get("rule", "")).lower()
+        fields = event.get("output_fields") or {}
+        proc = str(fields.get("proc.name", "")).lower()
+        fd = str(fields.get("fd.name", "")).lower()
+        fd_type = str(fields.get("fd.type", "")).lower()
+        evt_type = str(fields.get("evt.type", "")).lower()
+        cmd = str(fields.get("proc.cmdline", "")).lower()
+
+        if "shell" in rule or proc.endswith(("/sh", "/bash", "/zsh")) or "shell" in cmd:
+            return "shell_execution"
+        if any(k in rule for k in ("privilege", "sudo", "setuid", "escalation")):
+            return "privilege_escalation"
+        if any(k in rule for k in ("escape", "nsenter", "chroot", "mount")):
+            return "container_escape"
+        if any(k in rule for k in ("write", "modify", "modification", "file")):
+            return "file_modification"
+        if any(k in rule for k in ("network", "connection", "outbound", "egress")) or fd_type in ("ipv4", "ipv6"):
+            return "unexpected_network_connection"
+        return "threat"
 
     def _normalize_severity(self, priority: str) -> str:
         return str(priority).upper() if priority else "UNKNOWN"
