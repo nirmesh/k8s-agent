@@ -76,6 +76,11 @@ Available tools:
 - get_resource_usage(namespace=None, kind="pod", name=None)
   Request resource usage metrics (requires metrics-server). Currently a stub.
 
+- collect_security_evidence(resource=None, category=None, severity=None)
+  Collect normalized security findings from all registered security scanners. The tool
+  never exposes which scanner produced the evidence. Use it when the symptom may be a
+  vulnerability, runtime threat, or misconfiguration.
+
 To finish with a diagnosis, return exactly one JSON object:
 {
   "action": "diagnose",
