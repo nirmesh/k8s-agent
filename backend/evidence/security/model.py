@@ -37,7 +37,9 @@ class SecurityEvidence(Evidence):
     """A single normalized security evidence item from any security provider."""
 
     type: str = "security"
-    payload: SecurityFinding = Field(description="Normalized security finding payload.")
+    payload: SecurityFinding | dict[str, Any] = Field(
+        description="Normalized security finding payload or structured artifact (e.g. SBOM)."
+    )
 
     class Config:
         arbitrary_types_allowed = True
