@@ -68,10 +68,12 @@ def get_registry(context: str | None = None, config_path: str | None = None) -> 
     """Return the default global registry, lazily initializing it."""
     global _DEFAULT_REGISTRY
     if _DEFAULT_REGISTRY is None:
+        from backend.providers.github_provider import GitHubProvider
         from backend.providers.kubernetes_provider import KubernetesProvider
         from backend.providers.security_provider import SecurityEvidenceProvider
 
         _DEFAULT_REGISTRY = ProviderRegistry()
         _DEFAULT_REGISTRY.register(KubernetesProvider(context=context, config_path=config_path))
         _DEFAULT_REGISTRY.register(SecurityEvidenceProvider())
+        _DEFAULT_REGISTRY.register(GitHubProvider())
     return _DEFAULT_REGISTRY
