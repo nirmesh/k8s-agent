@@ -28,6 +28,8 @@ class SecurityFinding(BaseModel):
     remediation: str | None = Field(default=None, description="Suggested remediation or fix.")
     rule_id: str | None = Field(default=None, description="Scanner rule/control ID.")
     cve_id: str | None = Field(default=None, description="CVE/CWE identifier when applicable.")
+    framework: str | None = Field(default=None, description="Control framework, e.g. NSA, MITRE, CIS.")
+    mitre_id: str | None = Field(default=None, description="MITRE ATT&CK technique ID if mapped.")
 
     class Config:
         arbitrary_types_allowed = True
