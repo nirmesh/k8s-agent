@@ -136,25 +136,59 @@ export default function RemediationPanel({ remediationId, investigation, onUpdat
 
       {(status === "AWAITING_APPROVAL" || status === "READY") && plan?.status === "READY" && (
         <div className="space-y-4">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Target</p>
               <p className="font-mono text-sm text-slate-200">{targetId(plan.target)}</p>
+              {plan.root_cause && (
+                <p className="text-sm text-slate-300">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Root cause: </span>
+                  {plan.root_cause}
+                </p>
+              )}
             </div>
-            <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${riskClass(plan.risk)}`}>
-              {plan.risk ?? "UNKNOWN"} risk
-            </span>
+            <div className="flex flex-wrap items-center gap-2">
+              {plan.remediation_type && (
+                <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${
+                  plan.remediation_type === "CONTAINMENT"
+                    ? "bg-amber-500/20 text-amber-300"
+                    : plan.remediation_type === "PATCH"
+                    ? "bg-cyan-500/20 text-cyan-300"
+                    : "bg-purple-500/20 text-purple-300"
+                }`}>
+                  {plan.remediation_type}
+                </span>
+              )}
+              <span className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${riskClass(plan.risk)}`}>
+                {plan.risk ?? "UNKNOWN"} risk
+              </span>
+            </div>
           </div>
+
+          {typeof plan.confidence === "number" && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Confidence</p>
+              <p className="text-sm font-semibold text-slate-200">{Math.round(plan.confidence * 100)}%</p>
+            </div>
+          )}
 
           {plan.changes && plan.changes.length > 0 && (
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Change</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Patch</p>
               <div className="mt-1 overflow-x-auto rounded-lg border border-slate-700 bg-slate-900 p-3 font-mono text-sm">
                 {plan.changes.map((c, i) => (
                   <div key={i} className="space-y-1">
                     <p className="text-slate-400">{c.path}</p>
-                    <p className="text-rose-400">- {String(c.before ?? "unset")}</p>
-                    <p className="text-emerald-400">+ {String(c.after ?? "unset")}</p>
+                    <div className="grid grid-cols-2 gap-2 text-xs sm:text-sm">
+                      <div>
+                        <span className="text-slate-500">Current:</span>
+                        <p className="text-rose-400">{String(c.before ?? "unset")}</p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Suggested:</span>
+                        <p className="text-emerald-400">{String(c.after ?? "unset")}</p>
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -168,14 +202,42 @@ export default function RemediationPanel({ remediationId, investigation, onUpdat
             </p>
           )}
 
-          {plan.verification && (
+          {plan.kubectl_commands && plan.kubectl_commands.length > 0 && (
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Verification</p>
-              <p className="text-sm text-slate-300">{plan.verification.type}: {plan.verification.expected}</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Generated command</p>
+              <div className="mt-1 space-y-1">
+                {plan.kubectl_commands.map((cmd, i) => (
+                  <pre key={i} className="overflow-x-auto rounded-lg border border-slate-700 bg-slate-900 p-3 font-mono text-xs text-slate-300">
+                    {cmd}
+                  </pre>
+                ))}
+              </div>
             </div>
           )}
 
-          {plan.rollback && (
+          {plan.verification_steps && plan.verification_steps.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Verification plan</p>
+              <ul className="mt-1 list-inside list-disc space-y-1 text-sm text-slate-300">
+                {plan.verification_steps.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {plan.rollback_steps && plan.rollback_steps.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Rollback plan</p>
+              <ul className="mt-1 list-inside list-disc space-y-1 text-sm text-slate-300">
+                {plan.rollback_steps.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {!plan.rollback_steps && plan.rollback && (
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Rollback</p>
               <p className="text-sm text-slate-300">{plan.rollback.strategy}</p>

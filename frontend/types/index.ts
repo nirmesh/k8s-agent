@@ -20,6 +20,9 @@ export interface RemediationPlan {
   status: "READY" | "NEED_USER_INPUT" | "NO_SAFE_REMEDIATION";
   summary?: string;
   question?: string;
+  root_cause?: string;
+  confidence?: number;
+  remediation_type?: "PATCH" | "CONFIG" | "CONTAINMENT" | "NEED_USER_INPUT" | "INVESTIGATE" | string;
   risk?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   tool?: string;
   arguments?: Record<string, unknown>;
@@ -28,6 +31,9 @@ export interface RemediationPlan {
   reason?: string;
   verification?: { type: string; expected: string };
   rollback?: { available: boolean; strategy: string };
+  kubectl_commands?: string[];
+  verification_steps?: string[];
+  rollback_steps?: string[];
 }
 
 export interface Investigation {

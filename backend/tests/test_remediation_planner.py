@@ -75,7 +75,7 @@ def test_need_user_input_rejected(planner, monkeypatch):
     diagnosis = {
         "status": "DIAGNOSED",
         "rootCause": "ImagePullBackOff",
-        "affectedResources": ["Deployment/default/app"],
+        "affectedResources": ["Service/default/app"],
         "evidence": [],
     }
     plan = planner.plan(diagnosis)
@@ -158,21 +158,23 @@ def test_unparseable_affected(planner):
     assert plan["status"] == "NO_SAFE_REMEDIATION"
 
 
-def test_image_tag_fallback(planner, monkeypatch):
+def test_image_tag_remediation(planner, monkeypatch):
     planner.toolkit.get_resource = MagicMock(
         return_value={
             "success": True,
             "data": {
-                "metadata": {"name": "web-app", "namespace": "default"},
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "containers": [
-                                {"name": "nginx", "image": "nginx:99.99"}
-                            ]
+                "resource": {
+                    "metadata": {"name": "web-app", "namespace": "default"},
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {"name": "nginx", "image": "nginx:99.99"}
+                                ]
+                            }
                         }
-                    }
-                },
+                    },
+                }
             },
         }
     )
@@ -182,14 +184,16 @@ def test_image_tag_fallback(planner, monkeypatch):
     )
     diagnosis = {
         "status": "DIAGNOSED",
-        "rootCause": "ImagePullBackOff: container image nginx:99.99 cannot be pulled",
+        "rootCause": "ImagePullBackOff: container image nginx:99.99 does not exist",
         "affectedResources": ["Deployment/default/web-app"],
         "evidence": [],
     }
     plan = planner.plan(diagnosis)
     assert plan["status"] == "READY"
     assert plan["tool"] == "patch_resource"
-    assert plan["arguments"]["patch"]["spec"]["template"]["spec"]["containers"][0]["image"] == "nginx"
+    assert plan["remediation_type"] == "PATCH"
+    assert plan["confidence"] == 0.98
+    assert plan["arguments"]["patch"]["spec"]["template"]["spec"]["containers"][0]["image"] == "nginx:1.27"
 
 
 def test_allowed_tools_list():

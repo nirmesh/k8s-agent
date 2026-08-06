@@ -4,6 +4,7 @@ from typing import Any
 
 from backend.ai.llm_client import generate
 from backend.core.logging import logger
+from backend.ai.remediation import RemediationEngine, Remediation
 from backend.kubernetes.toolkit import K8sToolkit
 
 ALLOWED_TOOLS = [
@@ -111,6 +112,12 @@ class RemediationPlanner:
             )
 
         manifest = manifest_result.get("data")
+
+        engine = RemediationEngine(self.toolkit)
+        remediation = engine.propose(diagnosis, resource, manifest)
+        if remediation:
+            return self._remediation_to_plan(remediation)
+
         related = self._collect_related(resource)
         prompt = self._build_prompt(
             diagnosis, evidence, resource, manifest, related, user_input=user_input
@@ -134,12 +141,7 @@ class RemediationPlanner:
             "related": related,
             "user_input": user_input or {},
         }
-        result = self._validate_plan(plan, resource, grounding)
-        if result.get("status") == "NO_SAFE_REMEDIATION":
-            fallback = self._image_tag_fallback(resource, manifest, grounding)
-            if fallback:
-                return fallback
-        return result
+        return self._validate_plan(plan, resource, grounding)
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
         candidates = diagnosis.get("affectedResources") or diagnosis.get("affected_resources") or []
@@ -377,81 +379,28 @@ class RemediationPlanner:
                 unsupported.append((path, value))
         return unsupported
 
-    def _image_tag_fallback(
-        self, resource: dict, manifest: Any, grounding: dict
-    ) -> dict | None:
-        """Generic fallback for un-pullable container image tags.
-
-        If the diagnosis points to an image/tag problem and the manifest contains
-        containers with explicit tags or digests, propose setting the image to the
-        repository component already present in the manifest. Kubernetes then
-        resolves the default 'latest' tag.
-        """
-        diagnosis = grounding.get("diagnosis") or {}
-        evidence = grounding.get("evidence") or []
-        text = json.dumps(diagnosis, default=str) + " " + json.dumps(evidence, default=str)
-        text = text.lower()
-        if not any(k in text for k in ("image", "tag", "pullbackoff", "errimagepull", "backoff")):
-            return None
-
-        resource_obj = manifest.get("resource") if isinstance(manifest, dict) and "resource" in manifest else manifest
-        if not isinstance(resource_obj, dict):
-            return None
-
-        containers = (
-            ((resource_obj.get("spec") or {}).get("template") or {}).get("spec") or {}
-        ).get("containers") or []
-        if not isinstance(containers, list):
-            return None
-
-        patches: list[dict[str, str]] = []
-        changes: list[dict[str, str]] = []
-        for i, container in enumerate(containers):
-            image = container.get("image")
-            name = container.get("name")
-            if not image or not name:
-                continue
-            # Strip tag or digest; keep only the repository already declared.
-            repo = image.split(":")[0].split("@")[0]
-            if repo == image:
-                continue
-            patches.append({"name": name, "image": repo})
-            changes.append(
-                {
-                    "path": f"spec.template.spec.containers[{i}].image",
-                    "before": image,
-                    "after": repo,
-                }
-            )
-
-        if not patches:
-            return None
-
-        patch = {"spec": {"template": {"spec": {"containers": patches}}}}
-        return {
-            "status": "READY",
-            "summary": "Remove invalid container image tag(s) so Kubernetes defaults to latest",
-            "risk": "MEDIUM",
-            "tool": "patch_resource",
-            "arguments": {
-                "kind": resource["kind"],
-                "namespace": resource.get("namespace"),
-                "name": resource["name"],
-                "patch": patch,
-            },
-            "target": resource,
-            "changes": changes,
-            "reason": "The current image tag(s) cannot be pulled; using the repository name lets Kubernetes resolve the default 'latest' tag.",
-            "verification": {
-                "type": "rollout_status",
-                "expected": "workload rolled out and pods become ready",
-            },
-            "rollback": {
-                "available": True,
-                "strategy": "Re-apply the original image tag to restore the previous state",
-            },
-            "evidenceGrounded": True,
+    def _remediation_to_plan(self, remediation: Remediation) -> dict:
+        plan: dict[str, Any] = {
+            "status": "READY" if remediation.tool else "NEED_USER_INPUT",
+            "summary": remediation.summary or remediation.reason,
+            "root_cause": remediation.root_cause,
+            "confidence": remediation.confidence,
+            "remediation_type": remediation.remediation_type,
+            "risk": remediation.risk,
+            "tool": remediation.tool,
+            "arguments": remediation.arguments,
+            "target": remediation.target,
+            "changes": remediation.changes,
+            "reason": remediation.reason,
+            "verification": remediation.verification,
+            "rollback": remediation.rollback,
+            "kubectl_commands": remediation.kubectl_commands,
+            "verification_steps": remediation.verification_steps,
+            "rollback_steps": remediation.rollback_steps,
         }
+        if remediation.question:
+            plan["question"] = remediation.question
+        return plan
 
 
 def _same_target(candidate: dict, expected: dict) -> bool:
