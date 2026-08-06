@@ -158,6 +158,40 @@ def test_unparseable_affected(planner):
     assert plan["status"] == "NO_SAFE_REMEDIATION"
 
 
+def test_image_tag_fallback(planner, monkeypatch):
+    planner.toolkit.get_resource = MagicMock(
+        return_value={
+            "success": True,
+            "data": {
+                "metadata": {"name": "web-app", "namespace": "default"},
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {"name": "nginx", "image": "nginx:99.99"}
+                            ]
+                        }
+                    }
+                },
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "backend.ai.remediation_planner.generate",
+        lambda *args, **kwargs: json.dumps({"status": "NO_SAFE_REMEDIATION"}),
+    )
+    diagnosis = {
+        "status": "DIAGNOSED",
+        "rootCause": "ImagePullBackOff: container image nginx:99.99 cannot be pulled",
+        "affectedResources": ["Deployment/default/web-app"],
+        "evidence": [],
+    }
+    plan = planner.plan(diagnosis)
+    assert plan["status"] == "READY"
+    assert plan["tool"] == "patch_resource"
+    assert plan["arguments"]["patch"]["spec"]["template"]["spec"]["containers"][0]["image"] == "nginx"
+
+
 def test_allowed_tools_list():
     assert "patch_resource" in ALLOWED_TOOLS
     assert "scale_workload" in ALLOWED_TOOLS

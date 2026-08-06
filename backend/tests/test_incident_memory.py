@@ -1,4 +1,5 @@
 import pytest
+from bson.objectid import ObjectId
 
 from backend.memory.incident_memory import IncidentMemory
 
@@ -6,11 +7,9 @@ from backend.memory.incident_memory import IncidentMemory
 class FakeCollection:
     def __init__(self):
         self._docs: list[dict] = []
-        self._next_id = 1
 
     def insert_one(self, doc):
-        doc["_id"] = self._next_id
-        self._next_id += 1
+        doc["_id"] = ObjectId()
         self._docs.append(doc)
         return type("Result", (), {"inserted_id": doc["_id"]})()
 

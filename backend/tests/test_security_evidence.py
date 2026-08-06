@@ -58,7 +58,7 @@ def test_falco_adapter_normalizes_events():
     adapter = FalcoAdapter(source=json.dumps(events))
     evidence = adapter.collect()
     assert len(evidence) == 2
-    assert evidence[0].payload.category == "threat"
+    assert evidence[0].payload.category == "unexpected_network_connection"
     assert evidence[0].payload.resource == "nginx-pod"
     assert evidence[1].payload.severity == "ERROR"
 

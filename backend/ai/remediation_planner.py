@@ -134,8 +134,12 @@ class RemediationPlanner:
             "related": related,
             "user_input": user_input or {},
         }
-        return self._validate_plan(plan, resource, grounding)
-        return self._validate_plan(plan, resource, grounding)
+        result = self._validate_plan(plan, resource, grounding)
+        if result.get("status") == "NO_SAFE_REMEDIATION":
+            fallback = self._image_tag_fallback(resource, manifest, grounding)
+            if fallback:
+                return fallback
+        return result
 
     def _extract_affected(self, diagnosis: dict) -> list[str]:
         candidates = diagnosis.get("affectedResources") or diagnosis.get("affected_resources") or []
@@ -372,6 +376,82 @@ class RemediationPlanner:
             if not _value_observed(value, grounding):
                 unsupported.append((path, value))
         return unsupported
+
+    def _image_tag_fallback(
+        self, resource: dict, manifest: Any, grounding: dict
+    ) -> dict | None:
+        """Generic fallback for un-pullable container image tags.
+
+        If the diagnosis points to an image/tag problem and the manifest contains
+        containers with explicit tags or digests, propose setting the image to the
+        repository component already present in the manifest. Kubernetes then
+        resolves the default 'latest' tag.
+        """
+        diagnosis = grounding.get("diagnosis") or {}
+        evidence = grounding.get("evidence") or []
+        text = json.dumps(diagnosis, default=str) + " " + json.dumps(evidence, default=str)
+        text = text.lower()
+        if not any(k in text for k in ("image", "tag", "pullbackoff", "errimagepull", "backoff")):
+            return None
+
+        resource_obj = manifest.get("resource") if isinstance(manifest, dict) and "resource" in manifest else manifest
+        if not isinstance(resource_obj, dict):
+            return None
+
+        containers = (
+            ((resource_obj.get("spec") or {}).get("template") or {}).get("spec") or {}
+        ).get("containers") or []
+        if not isinstance(containers, list):
+            return None
+
+        patches: list[dict[str, str]] = []
+        changes: list[dict[str, str]] = []
+        for i, container in enumerate(containers):
+            image = container.get("image")
+            name = container.get("name")
+            if not image or not name:
+                continue
+            # Strip tag or digest; keep only the repository already declared.
+            repo = image.split(":")[0].split("@")[0]
+            if repo == image:
+                continue
+            patches.append({"name": name, "image": repo})
+            changes.append(
+                {
+                    "path": f"spec.template.spec.containers[{i}].image",
+                    "before": image,
+                    "after": repo,
+                }
+            )
+
+        if not patches:
+            return None
+
+        patch = {"spec": {"template": {"spec": {"containers": patches}}}}
+        return {
+            "status": "READY",
+            "summary": "Remove invalid container image tag(s) so Kubernetes defaults to latest",
+            "risk": "MEDIUM",
+            "tool": "patch_resource",
+            "arguments": {
+                "kind": resource["kind"],
+                "namespace": resource.get("namespace"),
+                "name": resource["name"],
+                "patch": patch,
+            },
+            "target": resource,
+            "changes": changes,
+            "reason": "The current image tag(s) cannot be pulled; using the repository name lets Kubernetes resolve the default 'latest' tag.",
+            "verification": {
+                "type": "rollout_status",
+                "expected": "workload rolled out and pods become ready",
+            },
+            "rollback": {
+                "available": True,
+                "strategy": "Re-apply the original image tag to restore the previous state",
+            },
+            "evidenceGrounded": True,
+        }
 
 
 def _same_target(candidate: dict, expected: dict) -> bool:
