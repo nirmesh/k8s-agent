@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import apiClient from "@/services/api";
 import MetricsPanel from "@/components/MetricsPanel";
 import RemediationPanel from "@/components/RemediationPanel";
+import SecuritySummary from "@/components/SecuritySummary";
 import ThemeToggle from "@/components/ThemeToggle";
 import type { Cluster, Investigation } from "@/types";
 
@@ -259,6 +260,8 @@ export default function Dashboard() {
             </ul>
           </section>
         )}
+
+        {current?.security_summary && <SecuritySummary summary={current.security_summary} />}
 
         {current?.diagnosis && (
           <section className="overflow-hidden rounded-2xl border border-slate-700/30 bg-slate-900/60 shadow-lg backdrop-blur">

@@ -88,6 +88,8 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
                     "events": result.get("events", {}),
                     "deployments": result.get("deployments", {}),
                     "network": result.get("network", {}),
+                    "security_evidence": result.get("security_evidence", []),
+                    "security_summary": result.get("security_summary", {}),
                     "diagnosis": diagnosis,
                     "remediation_id": remediation_id,
                     "root_cause": diagnosis.get("root_cause", ""),

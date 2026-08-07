@@ -354,6 +354,45 @@ class K8sToolkit:
             logger.exception("get_events failed")
             return self._err("get_events", "INTERNAL_ERROR", str(exc))
 
+    def get_custom_resources(
+        self,
+        group: str,
+        version: str,
+        plural: str,
+        namespace: str | None = None,
+    ) -> dict:
+        """List custom resources (CRDs) for the given group/version/plural."""
+        try:
+            api = self._api(client.CustomObjectsApi)
+            if namespace:
+                method = getattr(api, "list_namespaced_custom_object")
+                result = method(group, version, namespace, plural)
+            else:
+                all_ns = getattr(api, "list_custom_object_for_all_namespaces", None)
+                if all_ns:
+                    result = all_ns(group, version, plural)
+                else:
+                    method = getattr(api, "list_cluster_custom_object")
+                    result = method(group, version, plural)
+            items = [self._serialize(i) for i in (getattr(result, "items", []) or [])]
+            return self._ok(
+                "get_custom_resources",
+                {
+                    "group": group,
+                    "version": version,
+                    "plural": plural,
+                    "namespace": namespace,
+                    "items": items,
+                },
+            )
+        except ApiException as exc:
+            return self._err("get_custom_resources", "K8S_ERROR", exc.reason or str(exc), status=exc.status)
+        except AttributeError as exc:
+            return self._err("get_custom_resources", "UNSUPPORTED_OPERATION", str(exc))
+        except Exception as exc:
+            logger.exception("get_custom_resources failed")
+            return self._err("get_custom_resources", "INTERNAL_ERROR", str(exc))
+
     def get_logs(self, namespace: str, pod: str, container: str | None = None, previous: bool = False, tail_lines: int = 100) -> dict:
         try:
             kwargs: dict[str, Any] = {"name": pod, "namespace": namespace}

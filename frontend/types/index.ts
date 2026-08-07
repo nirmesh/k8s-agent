@@ -36,6 +36,33 @@ export interface RemediationPlan {
   rollback_steps?: string[];
 }
 
+export interface SecurityWorkload {
+  name: string;
+  namespace: string;
+  kind: string;
+  risk_score: number;
+  counts: Record<string, number>;
+  findings: { title: string; severity: string; category: string; cve_id?: string; recommendation?: string }[];
+  internet_facing?: boolean;
+  privileged?: boolean;
+  host_network?: boolean;
+  replicas?: number;
+  running?: number;
+  recommendation: string;
+}
+
+export interface SecuritySummary {
+  cluster_security_score: number;
+  critical_workloads: SecurityWorkload[];
+  high_risk_namespaces: { namespace: string; average_score: number }[];
+  top_10_risks: SecurityWorkload[];
+  top_recommendations: string[];
+  total_vulnerabilities: number;
+  total_misconfigurations: number;
+  total_exposed_secrets: number;
+  workload_count: number;
+}
+
 export interface Investigation {
   id: string;
   status: string;
@@ -53,6 +80,8 @@ export interface Investigation {
   root_cause: string;
   namespace: string;
   confidence: number;
+  security_summary?: SecuritySummary | null;
+  security_evidence?: any[] | null;
   created_at: string;
   updated_at: string;
 }
