@@ -3,6 +3,7 @@ from collections.abc import Callable
 from backend.ai.diagnosis_synthesizer import synthesize, validate_diagnosis
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.scoring import score_security_posture
 from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
 from backend.kubernetes.toolkit import K8sToolkit
 
@@ -68,7 +69,7 @@ def run_investigation(
 
     security_collection = SecurityEvidenceCollector(toolkit).collect()
     security_evidence = security_collection.get("evidence") or []
-    security_summary = security_collection.get("summary") or {}
+    security_summary = score_security_posture(security_collection.get("summary") or {})
 
     if progress_callback:
         progress_callback("AI Reasoning")
