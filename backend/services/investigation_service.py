@@ -16,7 +16,7 @@ def _diagnosis_from_synthesis(result: dict, evidence: list[dict]) -> dict:
             "status": result.get("status", "NO_ISSUE"),
             "root_cause": result.get("summary", "No verified operational issue was found."),
             "explanation": result.get("summary", "No verified operational issue was found."),
-            "fix": "Remediation is intentionally not generated during investigation.",
+            "fix": "No remediation generated during investigation.",
             "kubectl_command": "",
             "prevention": "",
             "confidence": 0.0,
@@ -33,16 +33,12 @@ def _diagnosis_from_synthesis(result: dict, evidence: list[dict]) -> dict:
             str(f.get("root_cause") or f.get("explanation") or "") for f in extra[:4]
         )
     evidence_by_id = {str(item.get("id")): item for item in evidence}
-    selected_evidence = [
-        evidence_by_id[eid]
-        for eid in primary.get("evidence_ids", [])
-        if eid in evidence_by_id
-    ]
+    selected_evidence = [evidence_by_id[eid] for eid in primary.get("evidence_ids", []) if eid in evidence_by_id]
     return {
         "status": result.get("status", "DIAGNOSED"),
         "root_cause": primary.get("root_cause") or result.get("summary", ""),
         "explanation": explanation,
-        "fix": "Remediation is intentionally deferred until the diagnosis is reviewed.",
+        "fix": "No remediation generated during investigation.",
         "kubectl_command": "",
         "prevention": "",
         "confidence": float(primary.get("confidence", 0.0) or 0.0),
@@ -57,12 +53,7 @@ def run_investigation(
     context: str | None = None,
     incident_description: str | None = None,
 ) -> dict:
-    """Read-only evidence-first investigation.
-
-    Deterministic Kubernetes investigators collect and verify facts first. The LLM
-    only synthesizes those facts. Security evidence remains a separate evidence domain.
-    Remediation is intentionally not generated here.
-    """
+    """Read-only evidence-first investigation; remediation is a separate phase."""
     logger.info("Starting evidence-driven SRE investigation")
     toolkit = K8sToolkit(context=context)
 
@@ -100,7 +91,7 @@ def run_investigation(
         "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
         "security_summary": security_summary,
         "diagnosis": diagnosis,
-        "remediation_plan": {"status": "NOT_REQUESTED", "reason": "Remediation is disabled during investigation."},
+        "remediation_plan": None,
         "trace": [],
         "signals": operational_evidence,
     }
