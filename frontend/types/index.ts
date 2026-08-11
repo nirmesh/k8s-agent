@@ -7,13 +7,26 @@ export interface InvestigationRequest {
   namespace?: string;
 }
 
+export interface DiagnosisFinding {
+  incident_type: string;
+  root_cause: string;
+  explanation: string;
+  confidence: number;
+  affected_resources: string[];
+  evidence_ids: string[];
+}
+
 export interface Diagnosis {
+  status?: "DIAGNOSED" | "NEED_MORE_EVIDENCE" | "NO_ISSUE" | string;
   root_cause: string;
   explanation: string;
   fix: string;
   kubectl_command: string;
   prevention: string;
   confidence: number;
+  affected_resources?: string[];
+  findings?: DiagnosisFinding[];
+  evidence?: any[];
 }
 
 export interface RemediationPlan {
@@ -55,6 +68,9 @@ export interface SecuritySummary {
   status: "AVAILABLE" | "UNAVAILABLE";
   reason?: string | null;
   cluster_security_score: number | null;
+  score_basis?: string;
+  scored_vulnerabilities?: number;
+  unscored_unknown_vulnerabilities?: number;
   total_vulnerabilities: number;
   critical_vulnerabilities: number;
   high_vulnerabilities: number;
