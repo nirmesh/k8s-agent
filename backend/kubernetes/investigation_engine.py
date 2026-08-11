@@ -45,12 +45,13 @@ def _owner_chain(toolkit: K8sToolkit, kind: str, namespace: str, name: str) -> l
     return [_resource(o.get("kind", "Resource"), o) for o in result.get("data", {}).get("owners", []) if o]
 
 
-def _selector_string(selector: dict[str, Any]) -> str:
-    return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
+def _selector_matches(pod: dict[str, Any], selector: dict[str, Any]) -> bool:
+    labels = (pod.get("metadata") or {}).get("labels") or {}
+    return all(labels.get(key) == value for key, value in selector.items())
 
 
 def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[dict[str, Any]]:
-    """Collect verified operational evidence without asking the LLM to discover it."""
+    """Collect verified operational evidence using the actual K8sToolkit API."""
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -59,10 +60,14 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
             seen.add(item["id"])
             evidence.append(item)
 
-    pods = _items(toolkit.list_resources("pod"))
-    deployments = _items(toolkit.list_resources("deployment"))
-    services = _items(toolkit.list_resources("service"))
-    pvcs = _items(toolkit.list_resources("persistentvolumeclaim"))
+    # K8sToolkit exposes get_resources(), not list_resources(). This was the bug
+    # that caused the background investigation to fail immediately and left the
+    # UI polling "Investigating..." forever.
+    pods = _items(toolkit.get_resources("pod"))
+    deployments = _items(toolkit.get_resources("deployment"))
+    services = _items(toolkit.get_resources("service"))
+    pvcs = _items(toolkit.get_resources("persistentvolumeclaim"))
+    endpoints = _items(toolkit.get_resources("endpoints"))
 
     for pod in pods:
         meta, status = pod.get("metadata") or {}, pod.get("status") or {}
@@ -80,19 +85,13 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
                 failures.append({"container": cs.get("name"), "reason": reason})
 
         pod_events = _items(toolkit.get_events(namespace=ns, resource_name=name, event_type="Warning"))
-        # Do not use a generic 'Failed' token: readiness failures also contain 'failed'.
         image_events = _event_matches(pod_events, ("ErrImagePull", "ImagePullBackOff", "pull image", "pulling image", "failed to pull"))
         probe_events = _event_matches(pod_events, ("Readiness probe failed", "Liveness probe failed", "Startup probe failed", "probe failed"))
         schedule_events = _event_matches(pod_events, ("FailedScheduling", "failedscheduling", "unschedulable"))
 
         if phase not in TERMINAL_OK or failures or image_events or probe_events or schedule_events:
             owners = _owner_chain(toolkit, "Pod", ns, name)
-            payload = {
-                "phase": phase,
-                "container_failures": failures,
-                "images": [x for x in images if x],
-                "warning_events": [{"reason": e.get("reason"), "message": e.get("message")} for e in pod_events],
-            }
+            payload = {"phase": phase, "container_failures": failures, "images": [x for x in images if x], "warning_events": [{"reason": e.get("reason"), "message": e.get("message")} for e in pod_events]}
             if image_events or any(f.get("reason") in {"ErrImagePull", "ImagePullBackOff"} for f in failures):
                 signal = "image_pull_failure"
                 payload["image_events"] = [{"reason": e.get("reason"), "message": e.get("message")} for e in image_events]
@@ -133,7 +132,7 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
             add(_evidence("deployment_rollout_failure", _resource("Deployment", dep), {"desired": desired, "ready": ready, "available": available, "conditions": conditions}, "HIGH"))
 
     endpoints_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for ep in _items(toolkit.list_resources("endpoints")):
+    for ep in endpoints:
         meta = ep.get("metadata") or {}
         endpoints_by_key[(meta.get("namespace", "default"), meta.get("name", ""))] = ep
 
@@ -143,7 +142,7 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
         if spec.get("type") == "ExternalName" or not selector:
             continue
         ns, name = meta.get("namespace", "default"), meta.get("name", "unknown")
-        matching_pods = _items(toolkit.list_resources("pod", namespace=ns, label_selector=_selector_string(selector)))
+        matching_pods = [p for p in pods if (p.get("metadata") or {}).get("namespace", "default") == ns and _selector_matches(p, selector)]
         ep = endpoints_by_key.get((ns, name)) or {}
         addresses, not_ready = [], []
         for subset in ep.get("subsets") or []:
