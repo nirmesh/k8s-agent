@@ -25,27 +25,39 @@ def _diagnosis_from_synthesis(result: dict, evidence: list[dict]) -> dict:
             "findings": [],
             "evidence": [],
         }
+
     primary, extra = findings[0], findings[1:]
+    root_causes = [str(f.get("root_cause") or f.get("explanation") or "") for f in findings]
+    if len(findings) == 1:
+        root_cause = root_causes[0]
+    else:
+        root_cause = f"{len(findings)} independent incidents detected: " + " | ".join(root_causes)
+
     explanation = primary.get("explanation") or primary.get("root_cause") or ""
     if extra:
-        explanation += " Additional independent findings: " + " ".join(
-            str(f.get("root_cause") or f.get("explanation") or "") for f in extra
-        )
+        explanation += " Additional independent findings: " + " ".join(root_causes[1:])
+
     evidence_by_id = {str(item.get("id")): item for item in evidence}
     selected_evidence = [
         evidence_by_id[eid]
-        for eid in primary.get("evidence_ids", [])
+        for finding in findings
+        for eid in finding.get("evidence_ids", [])
         if eid in evidence_by_id
     ]
+
     return {
         "status": result.get("status", "DIAGNOSED"),
-        "root_cause": primary.get("root_cause") or result.get("summary", ""),
+        "root_cause": root_cause,
         "explanation": explanation,
         "fix": "No remediation generated during investigation.",
         "kubectl_command": "",
         "prevention": "",
-        "confidence": float(primary.get("confidence", 0.0) or 0.0),
-        "affected_resources": primary.get("affected_resources") or [],
+        "confidence": max(float(f.get("confidence", 0.0) or 0.0) for f in findings),
+        "affected_resources": [
+            resource
+            for finding in findings
+            for resource in (finding.get("affected_resources") or [])
+        ],
         "findings": findings,
         "evidence": selected_evidence,
     }
@@ -77,7 +89,7 @@ def run_investigation(
     synthesis = synthesize(verified, incident_description or DEFAULT_INCIDENT)
     synthesis = validate_diagnosis(synthesis, verified)
     # The LLM is a synthesis layer, not the source of truth for incident count.
-    # If it omitted an independently verified incident, add a deterministic,
+    # If it omits an independently verified incident, add a deterministic,
     # evidence-grounded finding rather than silently dropping the incident.
     synthesis = ensure_complete_findings(synthesis, verified)
     diagnosis = _diagnosis_from_synthesis(synthesis, verified)
