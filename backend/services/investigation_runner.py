@@ -6,7 +6,6 @@ from backend.core.database import get_db
 from backend.core.logging import logger
 from backend.kubernetes.executor import set_context
 from backend.services.investigation_service import run_investigation
-from backend.services.remediation_service import create_remediation
 
 
 def create_investigation(user_id: str) -> str:
@@ -25,6 +24,7 @@ def create_investigation(user_id: str) -> str:
         "root_cause": "",
         "namespace": "",
         "confidence": 0,
+        "remediation_plan": {"status": "NOT_REQUESTED"},
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -53,7 +53,7 @@ def _progress_callback(db, investigation_id: str):
 
 
 def run_and_save(investigation_id: str, context: str | None = None) -> None:
-    """Run a full investigation and persist evidence and diagnosis to Mongo."""
+    """Run the read-only investigation and persist evidence and diagnosis."""
     set_context(context)
     db = get_db()
     db.investigations.update_one(
@@ -64,19 +64,13 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
     try:
         progress = _progress_callback(db, investigation_id)
         result = run_investigation(progress_callback=progress, context=context)
-
-        namespace = ""
-        problematic = result.get("pods", {}).get("problematic_pods", [])
-        if problematic:
-            namespace = problematic[0].get("namespace", "")
-
         diagnosis = result.get("diagnosis", {})
-        remediation_id = create_remediation(
-            investigation_id,
-            result.get("remediation_plan", {}),
-            diagnosis,
-            context,
-        )
+        affected = diagnosis.get("affected_resources") or []
+        namespace = ""
+        if affected:
+            parts = str(affected[0]).split("/")
+            if len(parts) == 3:
+                namespace = parts[1]
 
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
@@ -92,7 +86,7 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
                     "security_evidence": result.get("security_evidence", []),
                     "security_summary": result.get("security_summary", {}),
                     "diagnosis": diagnosis,
-                    "remediation_id": remediation_id,
+                    "remediation_plan": result.get("remediation_plan", {"status": "NOT_REQUESTED"}),
                     "root_cause": diagnosis.get("root_cause", ""),
                     "namespace": namespace,
                     "confidence": diagnosis.get("confidence", 0),
