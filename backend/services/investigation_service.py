@@ -1,78 +1,55 @@
 from collections.abc import Callable
-import json
 
-from backend.ai.remediation_planner import RemediationPlanner
-from backend.ai.sre_agent import SREAgent, normalize_diagnosis
+from backend.ai.diagnosis_synthesizer import synthesize, validate_diagnosis
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
-from backend.kubernetes.detectors import collect_cluster_signals
+from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
 from backend.kubernetes.toolkit import K8sToolkit
 
-DEFAULT_INCIDENT = (
-    "You are an SRE and Kubernetes Security Engineer. Investigate the cluster for "
-    "operational incidents AND security findings. Prioritize by business impact. "
-    "Explain WHY a workload is risky and recommend only actionable remediation. "
-    "Never list raw CVEs unless explicitly requested."
-)
+DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational incidents."
 
 
-def _security_summary_text(summary: dict) -> str:
-    if not summary:
-        return ""
-    if summary.get("status") == "UNAVAILABLE":
-        return f"Security data unavailable: {summary.get('reason') or 'unknown reason'}. Do not fabricate findings."
-    lines = [
-        f"Cluster Security Score: {summary.get('cluster_security_score') if summary.get('cluster_security_score') is not None else 'UNKNOWN'}/100",
-        f"Total vulnerabilities: {summary.get('total_vulnerabilities', 0)}",
-        f"Critical vulnerabilities: {summary.get('critical_vulnerabilities', 0)}",
-        f"High vulnerabilities: {summary.get('high_vulnerabilities', 0)}",
-        f"Medium vulnerabilities: {summary.get('medium_vulnerabilities', 0)}",
-        f"Low vulnerabilities: {summary.get('low_vulnerabilities', 0)}",
-        f"Total misconfigurations: {summary.get('total_misconfigurations', 0)}",
-        f"Total exposed secrets: {summary.get('total_exposed_secrets', 0)}",
+def _diagnosis_from_synthesis(result: dict, evidence: list[dict]) -> dict:
+    findings = result.get("findings") or []
+    if not findings:
+        return {
+            "status": result.get("status", "NO_ISSUE"),
+            "root_cause": result.get("summary", "No verified operational issue was found."),
+            "explanation": result.get("summary", "No verified operational issue was found."),
+            "fix": "Remediation is intentionally not generated during investigation.",
+            "kubectl_command": "",
+            "prevention": "",
+            "confidence": 0.0,
+            "affected_resources": [],
+            "findings": [],
+            "evidence": [],
+        }
+
+    primary = findings[0]
+    extra = findings[1:]
+    explanation = primary.get("explanation") or primary.get("root_cause") or ""
+    if extra:
+        explanation += " Additional independent findings: " + " ".join(
+            str(f.get("root_cause") or f.get("explanation") or "") for f in extra[:4]
+        )
+    evidence_by_id = {str(item.get("id")): item for item in evidence}
+    selected_evidence = [
+        evidence_by_id[eid]
+        for eid in primary.get("evidence_ids", [])
+        if eid in evidence_by_id
     ]
-    top = summary.get("top_10_risks") or []
-    if top:
-        lines.append("Top risky workloads (name: risk score):")
-        for w in top[:10]:
-            lines.append(
-                f"  - {w['namespace']}/{w['name']}: score {w['risk_score']}, "
-                f"critical={w['counts'].get('CRITICAL', 0)}, high={w['counts'].get('HIGH', 0)}, "
-                f"internet_facing={w.get('internet_facing', False)}, recommendation={w.get('recommendation', '')}"
-            )
-    return "\n".join(lines)
-
-
-def _enrich_affected_with_owners(diagnosis: dict, toolkit: K8sToolkit) -> None:
-    """Add controller owner IDs (ReplicaSet, Deployment, etc.) to affected resources."""
-    affected = diagnosis.get("affected_resources") or diagnosis.get("affectedResources") or []
-    if not isinstance(affected, list):
-        return
-
-    extras: set[str] = set()
-    for ar in affected:
-        if not isinstance(ar, str):
-            continue
-        parts = ar.split("/")
-        if len(parts) != 3:
-            continue
-        kind, namespace, name = parts
-        owner_result = toolkit.get_owner(kind, namespace, name)
-        if not owner_result.get("success"):
-            continue
-        for owner in owner_result.get("data", {}).get("owners", []):
-            okind = (owner.get("kind") or "").lower()
-            meta = owner.get("metadata") or {}
-            oname = meta.get("name") or owner.get("name", "")
-            ons = meta.get("namespace") or namespace
-            if okind and oname:
-                extras.add(f"{okind}/{ons}/{oname}")
-
-    if extras:
-        # Put controller owners first so the remediation planner targets the
-        # workload (Deployment, StatefulSet, etc.) rather than an individual Pod.
-        kept = [a for a in affected if a not in extras]
-        diagnosis["affected_resources"] = list(extras) + kept
+    return {
+        "status": result.get("status", "DIAGNOSED"),
+        "root_cause": primary.get("root_cause") or result.get("summary", ""),
+        "explanation": explanation,
+        "fix": "Remediation is intentionally deferred until the diagnosis is reviewed.",
+        "kubectl_command": "",
+        "prevention": "",
+        "confidence": float(primary.get("confidence", 0.0) or 0.0),
+        "affected_resources": primary.get("affected_resources") or [],
+        "findings": findings,
+        "evidence": selected_evidence,
+    }
 
 
 def run_investigation(
@@ -80,54 +57,50 @@ def run_investigation(
     context: str | None = None,
     incident_description: str | None = None,
 ) -> dict:
-    """Run detector -> security collector -> tool-using investigator -> remediation planner.
+    """Read-only evidence-first investigation.
 
-    Cluster-wide mode collects deterministic operational signals and normalized security
-    evidence from Trivy CRDs. Targeted mode uses the supplied symptom.
+    Deterministic Kubernetes investigators collect and verify facts first. The LLM
+    only synthesizes those facts. Security evidence remains a separate evidence domain.
+    Remediation is intentionally not generated here.
     """
-    logger.info("Starting SRE agent investigation")
+    logger.info("Starting evidence-driven SRE investigation")
     toolkit = K8sToolkit(context=context)
-    signals = collect_cluster_signals(toolkit)
+
+    if progress_callback:
+        progress_callback("Checking Pods")
+    operational_evidence = collect_operational_evidence(toolkit)
+
+    if progress_callback:
+        progress_callback("Analyzing Events")
+        progress_callback("Inspecting Deployments")
+        progress_callback("Checking Networking")
 
     security_collection = SecurityEvidenceCollector(toolkit).collect()
     security_evidence = security_collection.get("evidence") or []
     security_summary = security_collection.get("summary") or {}
-    security_text = _security_summary_text(security_summary)
 
-    base = incident_description or DEFAULT_INCIDENT
-    parts = [base]
-    if signals:
-        parts.append(
-            "Currently observed operational signals (treat as leads, verify with tools):\n"
-            + json.dumps(signals, default=str)
-        )
-    if security_text:
-        parts.append(
-            "Collected security evidence from Trivy Operator CRDs (vulnerability, config audit, exposed secret, SBOM):\n"
-            + security_text
-        )
-    incident = "\n\n".join(parts)
+    if progress_callback:
+        progress_callback("AI Reasoning")
 
-    agent = SREAgent(context=context)
-    diagnosis = agent.run(
-        incident_description=incident,
-        progress_callback=progress_callback,
-    )
+    verified = evidence_as_json(operational_evidence)
+    synthesis = synthesize(verified, incident_description or DEFAULT_INCIDENT)
+    synthesis = validate_diagnosis(synthesis, verified)
+    diagnosis = _diagnosis_from_synthesis(synthesis, verified)
 
-    _enrich_affected_with_owners(diagnosis, toolkit)
-    remediation_plan = RemediationPlanner(context=context).plan(diagnosis)
+    if progress_callback:
+        progress_callback("Root Cause Found")
 
     return {
         "pods": {},
         "logs": {},
         "events": {},
         "deployments": {},
-        "network": {"signals": signals},
-        "operational_evidence": signals,
+        "network": {"signals": operational_evidence},
+        "operational_evidence": operational_evidence,
         "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
         "security_summary": security_summary,
-        "diagnosis": normalize_diagnosis(diagnosis),
-        "remediation_plan": remediation_plan,
-        "trace": agent.trace,
-        "signals": signals,
+        "diagnosis": diagnosis,
+        "remediation_plan": {"status": "NOT_REQUESTED", "reason": "Remediation is disabled during investigation."},
+        "trace": [],
+        "signals": operational_evidence,
     }
