@@ -52,15 +52,24 @@ export interface SecurityWorkload {
 }
 
 export interface SecuritySummary {
-  cluster_security_score: number;
-  critical_workloads: SecurityWorkload[];
-  high_risk_namespaces: { namespace: string; average_score: number }[];
-  top_10_risks: SecurityWorkload[];
-  top_recommendations: string[];
+  status: "AVAILABLE" | "UNAVAILABLE";
+  reason?: string | null;
+  cluster_security_score: number | null;
   total_vulnerabilities: number;
+  critical_vulnerabilities: number;
+  high_vulnerabilities: number;
+  medium_vulnerabilities: number;
+  low_vulnerabilities: number;
+  unknown_vulnerabilities: number;
   total_misconfigurations: number;
   total_exposed_secrets: number;
-  workload_count: number;
+  workload_count?: number;
+  affected_workloads?: number;
+  affected_namespaces?: number;
+  critical_workloads?: SecurityWorkload[];
+  high_risk_namespaces?: { namespace: string; average_score: number }[];
+  top_10_risks: SecurityWorkload[];
+  top_recommendations: string[];
 }
 
 export interface Investigation {
@@ -80,6 +89,7 @@ export interface Investigation {
   root_cause: string;
   namespace: string;
   confidence: number;
+  operational_evidence?: any | null;
   security_summary?: SecuritySummary | null;
   security_evidence?: any[] | null;
   created_at: string;

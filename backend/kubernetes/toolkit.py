@@ -354,35 +354,117 @@ class K8sToolkit:
             logger.exception("get_events failed")
             return self._err("get_events", "INTERNAL_ERROR", str(exc))
 
+    def discover_crd(self, group: str, plural: str) -> dict | None:
+        """Inspect installed CRDs and return the stored version and scope for a group/plural."""
+        try:
+            api = self._api(client.ApiextensionsV1Api)
+            result = api.list_custom_resource_definition()
+            for crd in getattr(result, "items", []):
+                spec = getattr(crd, "spec", None)
+                if not spec:
+                    continue
+                if getattr(spec, "group", None) != group:
+                    continue
+                names = getattr(spec, "names", None)
+                if not names or getattr(names, "plural", None) != plural:
+                    continue
+                versions = [v.name for v in getattr(spec, "versions", []) if getattr(v, "served", False)]
+                stored = getattr(getattr(crd, "status", None), "stored_versions", None) or []
+                version = (stored[0] if stored else versions[0]) if versions else "v1alpha1"
+                scope = getattr(spec, "scope", "Namespaced")
+                return {"version": version, "scope": scope}
+        except ApiException as exc:
+            logger.warning(f"CRD discovery failed for {plural}.{group}: {exc.reason}")
+        except Exception:
+            logger.exception("CRD discovery failed")
+        return None
+
+    @staticmethod
+    def _items_from_result(result: Any) -> list[Any]:
+        """Return the items list whether the API returned a dict or a model object."""
+        if isinstance(result, dict):
+            return result.get("items") or []
+        return getattr(result, "items", []) or []
+
     def get_custom_resources(
         self,
         group: str,
-        version: str,
-        plural: str,
+        version: str | None = None,
+        plural: str = "",
         namespace: str | None = None,
     ) -> dict:
-        """List custom resources (CRDs) for the given group/version/plural."""
+        """List custom resources (CRDs) for the given group/plural, discovering version and scope if needed."""
         try:
+            scope = "Namespaced"
+            if not version:
+                discovered = self.discover_crd(group, plural)
+                if not discovered:
+                    return self._err(
+                        "get_custom_resources",
+                        "CRD_NOT_FOUND",
+                        f"CRD {plural}.{group} is not installed or not accessible",
+                    )
+                version = discovered["version"]
+                scope = discovered["scope"]
+
             api = self._api(client.CustomObjectsApi)
             if namespace:
                 method = getattr(api, "list_namespaced_custom_object")
                 result = method(group, version, namespace, plural)
-            else:
-                all_ns = getattr(api, "list_custom_object_for_all_namespaces", None)
-                if all_ns:
-                    result = all_ns(group, version, plural)
-                else:
-                    method = getattr(api, "list_cluster_custom_object")
-                    result = method(group, version, plural)
-            items = [self._serialize(i) for i in (getattr(result, "items", []) or [])]
+                items = [self._serialize(i) for i in self._items_from_result(result)]
+                return self._ok(
+                    "get_custom_resources",
+                    {
+                        "group": group,
+                        "version": version,
+                        "plural": plural,
+                        "namespace": namespace,
+                        "items": items,
+                    },
+                )
+
+            if scope == "Cluster":
+                method = getattr(api, "list_cluster_custom_object")
+                result = method(group, version, plural)
+                items = [self._serialize(i) for i in self._items_from_result(result)]
+                return self._ok(
+                    "get_custom_resources",
+                    {
+                        "group": group,
+                        "version": version,
+                        "plural": plural,
+                        "namespace": None,
+                        "items": items,
+                    },
+                )
+
+            # Namespaced CRDs: list every namespace to avoid relying on a
+            # non-existent list_custom_object_for_all_namespaces method.
+            ns_result = self.get_resources("namespace")
+            if not ns_result.get("success"):
+                return self._err("get_custom_resources", "K8S_ERROR", "Could not list namespaces")
+            items: list[Any] = []
+            method = getattr(api, "list_namespaced_custom_object")
+            for ns in (ns_result.get("data") or {}).get("items", []):
+                ns_name = (ns.get("metadata") or {}).get("name")
+                if not ns_name:
+                    continue
+                try:
+                    result = method(group, version, ns_name, plural)
+                    items.extend(self._items_from_result(result))
+                except ApiException as exc:
+                    # A 404 for a single namespace usually means the CRD is not
+                    # present there; continue with the others.
+                    if getattr(exc, "status", None) != 404:
+                        logger.warning(f"Failed to list {plural} in {ns_name}: {exc.reason}")
             return self._ok(
                 "get_custom_resources",
                 {
                     "group": group,
                     "version": version,
                     "plural": plural,
-                    "namespace": namespace,
-                    "items": items,
+                    "namespace": None,
+                    "items": [self._serialize(i) for i in items],
                 },
             )
         except ApiException as exc:

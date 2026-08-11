@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: readiness-app
-  namespace: sre-lab
+  namespace: ai-test
 spec:
   replicas: 1
   selector:

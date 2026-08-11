@@ -11,17 +11,39 @@ const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 
 export default function SecuritySummary({ summary }: Props) {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+
   if (!summary) return null;
 
-  const score = summary.cluster_security_score ?? 0;
+  if (summary.status === "UNAVAILABLE") {
+    return (
+      <section className="rounded-2xl border border-rose-700/30 bg-slate-900/60 p-6 shadow-lg backdrop-blur">
+        <h2 className="text-lg font-semibold text-rose-300">Security Data Unavailable</h2>
+        <p className="mt-2 text-sm text-slate-300">
+          {summary.reason || "Security evidence could not be collected from the cluster."}
+        </p>
+      </section>
+    );
+  }
+
+  const rawScore = summary.cluster_security_score;
+  const score = rawScore ?? null;
+  const scoreLabel = score === null ? "UNKNOWN" : `${score}/100`;
   const scoreColor =
-    score >= 80 ? "text-emerald-400" : score >= 50 ? "text-amber-400" : "text-rose-400";
+    score === null
+      ? "text-slate-400"
+      : score >= 80
+      ? "text-emerald-400"
+      : score >= 50
+      ? "text-amber-400"
+      : "text-rose-400";
 
   const toggle = (idx: number) => {
     setExpanded((prev) => ({ ...prev, [idx]: !prev[idx] }));
   };
 
   const top = summary.top_10_risks || [];
+  const workloadCount =
+    summary.affected_workloads ?? summary.workload_count ?? 0;
 
   return (
     <section className="rounded-2xl border border-slate-700/30 bg-slate-900/60 p-6 shadow-lg backdrop-blur">
@@ -32,7 +54,7 @@ export default function SecuritySummary({ summary }: Props) {
         </div>
         <div className="text-right">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Cluster Score</p>
-          <p className={`text-3xl font-bold ${scoreColor}`}>{score}/100</p>
+          <p className={`text-3xl font-bold ${scoreColor}`}>{scoreLabel}</p>
         </div>
       </div>
 
@@ -51,7 +73,34 @@ export default function SecuritySummary({ summary }: Props) {
         </div>
         <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4">
           <p className="text-xs uppercase tracking-wider text-slate-500">Workloads</p>
-          <p className="text-xl font-semibold text-slate-100">{summary.workload_count ?? 0}</p>
+          <p className="text-xl font-semibold text-slate-100">{workloadCount}</p>
+        </div>
+      </div>
+
+      <div className="mb-6 grid grid-cols-3 gap-4 md:grid-cols-6">
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-rose-400">Critical</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.critical_vulnerabilities ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-orange-400">High</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.high_vulnerabilities ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-amber-400">Medium</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.medium_vulnerabilities ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-emerald-400">Low</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.low_vulnerabilities ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-slate-400">Unknown</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.unknown_vulnerabilities ?? 0}</p>
+        </div>
+        <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
+          <p className="text-[10px] uppercase tracking-wider text-slate-400">Namespaces</p>
+          <p className="text-lg font-semibold text-slate-100">{summary.affected_namespaces ?? 0}</p>
         </div>
       </div>
 

@@ -88,6 +88,54 @@ class RemediationPlanner:
                 target={"kind": "cluster", "namespace": "-", "name": "-"},
             )
 
+        root_causes = self._extract_root_causes(diagnosis)
+        candidates: list[Remediation] = []
+
+        for rc in root_causes:
+            affected = rc.get("affected") or []
+            if not affected:
+                continue
+
+            resource = self._parse_resource(affected[0], {**diagnosis, "namespace": rc.get("namespace") or diagnosis.get("namespace")})
+            if not resource:
+                continue
+
+            manifest_result = self.toolkit.get_resource(
+                resource["kind"], resource["namespace"], resource["name"]
+            )
+            if not manifest_result.get("success"):
+                continue
+
+            manifest = manifest_result.get("data")
+
+            rc_diagnosis = {
+                "status": "DIAGNOSED",
+                "rootCause": rc.get("description") or diagnosis.get("rootCause") or diagnosis.get("root_cause", ""),
+                "rootCauseId": rc.get("id"),
+                "rootCauseType": rc.get("type"),
+                "evidence": rc.get("evidence") or [],
+                "affectedResources": affected,
+            }
+
+            engine = RemediationEngine(self.toolkit)
+            remediation = engine.propose(rc_diagnosis, resource, manifest)
+            if remediation:
+                remediation.root_cause_id = rc.get("id")
+                remediation.evidence_ids = [e.get("id") for e in rc.get("evidence") or [] if e.get("id")]
+                remediation.evidence = rc.get("evidence") or []
+                remediation.id = f"rem-{rc.get('id', '0')}"
+                candidates.append(remediation)
+
+        if candidates:
+            candidates.sort(
+                key=lambda c: (c.remediation_type == "CONTAINMENT", -c.confidence)
+            )
+            top = self._remediation_to_plan(candidates[0])
+            top["remediation_candidates"] = [self._remediation_to_plan(c) for c in candidates]
+            top["root_causes"] = [self._root_cause_to_dict(rc) for rc in root_causes]
+            return top
+
+        # Fallback to the single-resource LLM planner for unhandled root causes.
         affected = self._extract_affected(diagnosis)
         evidence = diagnosis.get("evidence") or []
         if not isinstance(evidence, list):
@@ -112,11 +160,6 @@ class RemediationPlanner:
             )
 
         manifest = manifest_result.get("data")
-
-        engine = RemediationEngine(self.toolkit)
-        remediation = engine.propose(diagnosis, resource, manifest)
-        if remediation:
-            return self._remediation_to_plan(remediation)
 
         related = self._collect_related(resource)
         prompt = self._build_prompt(
@@ -157,6 +200,45 @@ class RemediationPlanner:
             namespace = diagnosis.get("namespace", "") or "default"
             return {"kind": parts[0].lower(), "namespace": namespace, "name": parts[1]}
         return None
+
+    def _extract_root_causes(self, diagnosis: dict) -> list[dict]:
+        raw = diagnosis.get("rootCauses") or diagnosis.get("root_causes") or []
+        if isinstance(raw, list) and raw:
+            causes = []
+            for i, rc in enumerate(raw):
+                if not isinstance(rc, dict):
+                    continue
+                affected: list[str] = []
+                if isinstance(rc.get("resource"), str):
+                    affected.append(rc["resource"])
+                for key in ("affectedResources", "affected_resources"):
+                    if isinstance(rc.get(key), list):
+                        affected.extend(rc[key])
+                affected = [a.strip() for a in affected if isinstance(a, str) and a.strip()]
+                causes.append({
+                    "id": rc.get("id") or f"rc-{i + 1}",
+                    "description": rc.get("description") or rc.get("rootCause") or rc.get("root_cause"),
+                    "type": rc.get("type") or rc.get("incidentType") or rc.get("incident_type"),
+                    "namespace": rc.get("namespace"),
+                    "affected": affected,
+                    "evidence": rc.get("evidence") or [],
+                })
+            return [c for c in causes if c["affected"]]
+
+        affected = self._extract_affected(diagnosis)
+        if not affected:
+            return []
+        return [{
+            "id": diagnosis.get("rootCauseId") or "rc-1",
+            "description": diagnosis.get("rootCause") or diagnosis.get("root_cause"),
+            "type": diagnosis.get("incidentType") or diagnosis.get("incident_type"),
+            "namespace": diagnosis.get("namespace"),
+            "affected": affected,
+            "evidence": diagnosis.get("evidence") or [],
+        }]
+
+    def _root_cause_to_dict(self, rc: dict) -> dict:
+        return dict(rc)
 
     def _collect_related(self, resource: dict) -> dict:
         """Gather generic live context; facts only, never a diagnosis or guessed fix."""
@@ -383,6 +465,8 @@ class RemediationPlanner:
         plan: dict[str, Any] = {
             "status": "READY" if remediation.tool else "NEED_USER_INPUT",
             "summary": remediation.summary or remediation.reason,
+            "id": remediation.id,
+            "root_cause_id": remediation.root_cause_id,
             "root_cause": remediation.root_cause,
             "confidence": remediation.confidence,
             "remediation_type": remediation.remediation_type,
@@ -397,9 +481,22 @@ class RemediationPlanner:
             "kubectl_commands": remediation.kubectl_commands,
             "verification_steps": remediation.verification_steps,
             "rollback_steps": remediation.rollback_steps,
+            "evidence_ids": remediation.evidence_ids or [],
+            "evidence": remediation.evidence or [],
         }
         if remediation.question:
             plan["question"] = remediation.question
+        if remediation.changes:
+            first = remediation.changes[0]
+            plan["field_path"] = remediation.field_path or first.get("path")
+            plan["current_value"] = remediation.current_value or first.get("before")
+            plan["proposed_value"] = remediation.proposed_value or first.get("after")
+        if remediation.field_path and "field_path" not in plan:
+            plan["field_path"] = remediation.field_path
+        if remediation.current_value is not None and "current_value" not in plan:
+            plan["current_value"] = remediation.current_value
+        if remediation.proposed_value is not None and "proposed_value" not in plan:
+            plan["proposed_value"] = remediation.proposed_value
         return plan
 
 

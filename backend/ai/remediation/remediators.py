@@ -8,6 +8,11 @@ from backend.ai.remediation.resolvers import is_known_tag, resolve_safe_tag
 from backend.kubernetes.toolkit import SCALABLE_KINDS
 
 
+# Images for which a root HTTP GET ("/") is a safe, well-known health check.
+# This is deliberately conservative; for other images we ask the user.
+_WELL_KNOWN_ROOT_HEALTH = {"nginx"}
+
+
 def _diagnosis_context(diagnosis: dict[str, Any]) -> str:
     """Flatten the diagnosis and evidence into a lowercase search string."""
     evidence = diagnosis.get("evidence") or []
@@ -34,8 +39,56 @@ def _live_event_context(toolkit: Any, namespace: str | None, name: str) -> str:
     return " ".join(fragments).lower()
 
 
+def _image_repo(image: str) -> str:
+    repo = image.split(":")[0].split("@")[0].split("/")[-1].lower()
+    return repo
+
+
+def _need_input(
+    resource: dict[str, str],
+    root_cause: str,
+    reason: str,
+    field_path: str | None = None,
+) -> Remediation:
+    return Remediation(
+        root_cause=root_cause,
+        confidence=0.7,
+        risk="MEDIUM",
+        remediation_type="NEED_USER_INPUT",
+        tool=None,
+        arguments={},
+        target=resource,
+        changes=[],
+        field_path=field_path,
+        reason=reason,
+        verification={"type": "manual", "expected": "User provides a valid value or configuration"},
+        rollback={"available": False, "strategy": "N/A"},
+        kubectl_commands=[],
+        verification_steps=[],
+        rollback_steps=[],
+        question=reason,
+        summary="User input required",
+    )
+
+
 class ImagePullBackOffRemediator(Remediator):
     """Root-cause remediation for image pull failures."""
+
+    _IMAGE_PULL_KEYWORDS = (
+        "imagepullbackoff",
+        "errimagepull",
+        "back-off pulling image",
+        "failed to pull image",
+    )
+
+    _IMAGE_NOT_FOUND_KEYWORDS = (
+        "not found",
+        "does not exist",
+        "unknown manifest",
+        "manifest unknown",
+        "manifest not known",
+        "no such image",
+    )
 
     def propose(
         self,
@@ -45,21 +98,27 @@ class ImagePullBackOffRemediator(Remediator):
         toolkit: Any,
     ) -> Remediation | None:
         text = _diagnosis_context(diagnosis)
-        if not any(k in text for k in ("imagepullbackoff", "errimagepull", "back-off pulling image")):
+        live = _live_event_context(toolkit, resource.get("namespace"), resource.get("name"))
+
+        # Evidence-linked activation: the root cause or live events for THIS
+        # resource must explicitly indicate an image pull failure.
+        root_type = str(diagnosis.get("rootCauseType") or "").lower()
+        if root_type != "image_pull_failure" and not any(k in text for k in self._IMAGE_PULL_KEYWORDS):
             return None
+        if not any(k in text for k in self._IMAGE_PULL_KEYWORDS):
+            if not any(k in live for k in self._IMAGE_PULL_KEYWORDS):
+                return None
 
-        text += " " + _live_event_context(toolkit, resource.get("namespace"), resource.get("name"))
-
+        text = f"{text} {live}".lower()
         category = self._classify(text)
 
         containers = (
-            ((manifest.get("spec") or {}).get("template") or {}).get("spec") or {}
-        ).get("containers") or []
+            (((manifest.get("spec") or {}).get("template") or {}).get("spec") or {})
+            .get("containers") or []
+        )
         if not isinstance(containers, list):
             return None
 
-        # If the text is not conclusive, treat a well-known image with an
-        # unrecognised tag as a non-existent tag case.
         if category == "unknown":
             for container in containers:
                 current = container.get("image", "")
@@ -72,19 +131,20 @@ class ImagePullBackOffRemediator(Remediator):
         if category == "image_not_found":
             return self._build_image_patch(resource, manifest, containers)
         if category == "private_registry":
-            return self._need_input(
+            return _need_input(
                 resource,
                 "Private registry authentication required",
                 "Attach the correct imagePullSecret to the ServiceAccount for this namespace.",
+                field_path="spec.template.spec.containers[].imagePullSecret",
             )
         if category == "dns_failure":
-            return self._need_input(
+            return _need_input(
                 resource,
                 "DNS resolution failure for image registry",
                 "Check DNS/network connectivity; do not change the container image.",
             )
         if category == "registry_timeout":
-            return self._need_input(
+            return _need_input(
                 resource,
                 "Registry timeout while pulling image",
                 "Retry the pull and verify registry health; do not change the container image.",
@@ -98,17 +158,7 @@ class ImagePullBackOffRemediator(Remediator):
             return "dns_failure"
         if any(k in text for k in ("i/o timeout", "timeout", "context deadline exceeded", "net/http")):
             return "registry_timeout"
-        if any(
-            k in text
-            for k in (
-                "not found",
-                "does not exist",
-                "unknown manifest",
-                "manifest unknown",
-                "manifest not known",
-                "no such image",
-            )
-        ):
+        if any(k in text for k in self._IMAGE_NOT_FOUND_KEYWORDS):
             return "image_not_found"
         return "unknown"
 
@@ -141,10 +191,11 @@ class ImagePullBackOffRemediator(Remediator):
             )
 
         if not patches:
-            return self._need_input(
+            return _need_input(
                 resource,
                 "Image tag cannot be verified",
-                "Known tags could not be verified for this image. Select an existing tag from the registry.",
+                "No automatically validated replacement image is available.",
+                field_path="spec.template.spec.containers[].image",
             )
 
         patch = {"spec": {"template": {"spec": {"containers": patches}}}}
@@ -169,16 +220,19 @@ class ImagePullBackOffRemediator(Remediator):
             },
             target=resource,
             changes=changes,
-            reason="Image tag does not exist.",
+            field_path=changes[0]["path"] if changes else None,
+            current_value=changes[0]["before"] if changes else None,
+            proposed_value=changes[0]["after"] if changes else None,
+            reason="Image tag does not exist or is not available.",
             verification={"type": "rollout_status", "expected": "deployment rolled out and pods become ready"},
             rollback={"available": True, "strategy": f"kubectl rollout undo {resource['kind']}/{resource['name']} -n {resource.get('namespace') or 'default'}"},
             kubectl_commands=set_image_cmds,
             verification_steps=[
                 f"kubectl rollout status {resource['kind']}/{resource['name']} -n {resource.get('namespace') or 'default'}",
-                "Verify pods are Ready",
+                "Verify pods are no longer ImagePullBackOff/ErrImagePull",
+                "Verify image is successfully pulled",
                 "Verify Deployment has Available replicas",
-                "Verify expected replica count",
-                "Check pod events for normal pull progress",
+                "Verify Pods are Ready",
             ],
             rollback_steps=[
                 f"kubectl rollout undo {resource['kind']}/{resource['name']} -n {resource.get('namespace') or 'default'}",
@@ -186,29 +240,120 @@ class ImagePullBackOffRemediator(Remediator):
             summary=f"Patch container image to {after}",
         )
 
-    def _need_input(
+
+class ReadinessProbeRemediator(Remediator):
+    """Root-cause remediation for HTTP readiness probe failures."""
+
+    _READINESS_KEYWORDS = ("readiness probe", "readinessprobe", "unhealthy")
+
+    def propose(
         self,
+        diagnosis: dict[str, Any],
         resource: dict[str, str],
-        root_cause: str,
-        reason: str,
-    ) -> Remediation:
-        return Remediation(
-            root_cause=root_cause,
-            confidence=0.85,
-            risk="MEDIUM",
-            remediation_type="NEED_USER_INPUT",
-            tool=None,
-            arguments={},
-            target=resource,
-            changes=[],
-            reason=reason,
-            verification={"type": "manual", "expected": "User provides a valid value or configuration"},
-            rollback={"available": False, "strategy": "N/A"},
-            kubectl_commands=[],
-            verification_steps=[],
-            rollback_steps=[],
-            question=reason,
-            summary="User input required",
+        manifest: dict[str, Any],
+        toolkit: Any,
+    ) -> Remediation | None:
+        root_type = str(diagnosis.get("rootCauseType") or "").lower()
+        text = _diagnosis_context(diagnosis)
+
+        if root_type != "readiness_probe_failure":
+            if not any(k in text for k in self._READINESS_KEYWORDS):
+                return None
+            # Require an HTTP failure code (e.g. 404) before acting.
+            if not any(code in text for code in ("404", "http 404", "status 404")):
+                return None
+
+        containers = (
+            (((manifest.get("spec") or {}).get("template") or {}).get("spec") or {})
+            .get("containers") or []
+        )
+        if not isinstance(containers, list):
+            return None
+
+        for i, container in enumerate(containers):
+            probe = container.get("readinessProbe") or {}
+            http_get = probe.get("httpGet") or {}
+            path = http_get.get("path")
+            port = http_get.get("port")
+            current_image = container.get("image", "")
+            repo = _image_repo(current_image)
+
+            if not path or repo not in _WELL_KNOWN_ROOT_HEALTH:
+                continue
+
+            # Propose a root path only for well-known images where "/" is a
+            # safe, evidence-backed default. For everything else ask the user.
+            if path == "/":
+                continue
+
+            container_name = container.get("name") or f"container-{i}"
+            patch = {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": container_name,
+                                    "readinessProbe": {
+                                        "httpGet": {
+                                            "path": "/",
+                                            "port": port,
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+            changes = [
+                {
+                    "path": f"spec.template.spec.containers[{i}].readinessProbe.httpGet.path",
+                    "before": path,
+                    "after": "/",
+                }
+            ]
+            return Remediation(
+                root_cause=f"Readiness probe path {path!r} on {current_image} returns HTTP 404.",
+                confidence=0.95,
+                risk="LOW",
+                remediation_type="PATCH",
+                tool="patch_resource",
+                arguments={
+                    "kind": resource["kind"],
+                    "namespace": resource.get("namespace"),
+                    "name": resource["name"],
+                    "patch": patch,
+                },
+                target=resource,
+                changes=changes,
+                field_path=changes[0]["path"],
+                current_value=changes[0]["before"],
+                proposed_value=changes[0]["after"],
+                reason="The configured readiness probe path does not exist. For nginx, GET / returns HTTP 200.",
+                verification={"type": "rollout_status", "expected": "deployment rolled out, readiness probes succeed, pods become Ready"},
+                rollback={"available": True, "strategy": f"kubectl rollout undo {resource['kind']}/{resource['name']} -n {resource.get('namespace') or 'default'}"},
+                kubectl_commands=[
+                    f"kubectl patch {resource['kind']} {resource['name']} -n {resource.get('namespace') or 'default'} --type=strategic -p '{json.dumps(patch)}'"
+                ],
+                verification_steps=[
+                    f"kubectl get deployment {resource['name']} -n {resource.get('namespace') or 'default'} -o jsonpath='{{.status.availableReplicas}}'",
+                    "kubectl get pods -w until Ready condition is True",
+                    "kubectl describe pod to confirm readiness probe succeeded",
+                    "curl the readiness endpoint from inside the pod and expect HTTP 200",
+                ],
+                rollback_steps=[
+                    f"kubectl rollout undo {resource['kind']}/{resource['name']} -n {resource.get('namespace') or 'default'}",
+                ],
+                summary=f"Change readiness probe path from {path!r} to /",
+            )
+
+        # No safe default endpoint could be derived.
+        return _need_input(
+            resource,
+            "Readiness probe failure",
+            "A documented health endpoint for this container could not be determined from the current evidence.",
+            field_path="spec.template.spec.containers[].readinessProbe.httpGet.path",
         )
 
 
@@ -287,17 +432,6 @@ class CrashLoopBackOffRemediator(Remediator):
 
 
 class OOMKilledRemediator(Remediator):
-    def propose(
-        self,
-        diagnosis: dict[str, Any],
-        resource: dict[str, str],
-        manifest: dict[str, Any],
-        toolkit: Any,
-    ) -> Remediation | None:
-        return None
-
-
-class ReadinessProbeRemediator(Remediator):
     def propose(
         self,
         diagnosis: dict[str, Any],

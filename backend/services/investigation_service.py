@@ -19,9 +19,15 @@ DEFAULT_INCIDENT = (
 def _security_summary_text(summary: dict) -> str:
     if not summary:
         return ""
+    if summary.get("status") == "UNAVAILABLE":
+        return f"Security data unavailable: {summary.get('reason') or 'unknown reason'}. Do not fabricate findings."
     lines = [
-        f"Cluster Security Score: {summary.get('cluster_security_score', 0)}/100",
+        f"Cluster Security Score: {summary.get('cluster_security_score') if summary.get('cluster_security_score') is not None else 'UNKNOWN'}/100",
         f"Total vulnerabilities: {summary.get('total_vulnerabilities', 0)}",
+        f"Critical vulnerabilities: {summary.get('critical_vulnerabilities', 0)}",
+        f"High vulnerabilities: {summary.get('high_vulnerabilities', 0)}",
+        f"Medium vulnerabilities: {summary.get('medium_vulnerabilities', 0)}",
+        f"Low vulnerabilities: {summary.get('low_vulnerabilities', 0)}",
         f"Total misconfigurations: {summary.get('total_misconfigurations', 0)}",
         f"Total exposed secrets: {summary.get('total_exposed_secrets', 0)}",
     ]
@@ -117,6 +123,7 @@ def run_investigation(
         "events": {},
         "deployments": {},
         "network": {"signals": signals},
+        "operational_evidence": signals,
         "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
         "security_summary": security_summary,
         "diagnosis": normalize_diagnosis(diagnosis),

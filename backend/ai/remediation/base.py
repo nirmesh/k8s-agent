@@ -25,6 +25,13 @@ class Remediation:
     rollback_steps: list[str]
     question: str | None = None
     summary: str | None = None
+    id: str | None = None
+    root_cause_id: str | None = None
+    evidence_ids: list[str] | None = None
+    field_path: str | None = None
+    current_value: str | None = None
+    proposed_value: str | None = None
+    evidence: list[dict[str, Any]] | None = None
 
 
 class Remediator(ABC):
