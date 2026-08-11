@@ -4,7 +4,6 @@ import hashlib
 import json
 from typing import Any
 
-from backend.evidence.model import Evidence
 from backend.kubernetes.toolkit import K8sToolkit
 
 
@@ -88,8 +87,6 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
     services = _items(toolkit.list_resources("service"))
     pvcs = _items(toolkit.list_resources("persistentvolumeclaim"))
 
-    # Pod/container failures are the primary operational seed. Events are scoped to
-    # the pod, preventing unrelated Warning events elsewhere from contaminating it.
     for pod in pods:
         meta = pod.get("metadata") or {}
         ns, name = meta.get("namespace", "default"), meta.get("name", "unknown")
@@ -110,7 +107,9 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
 
         events_result = toolkit.get_events(namespace=ns, resource_name=name, event_type="Warning")
         pod_events = _items(events_result)
-        image_events = _event_matches(pod_events, ("Failed", "ErrImagePull", "ImagePullBackOff", "pull image"))
+        # Never use a generic 'Failed' token here: readiness failures also contain
+        # the word 'failed'. Image diagnosis requires an image-specific signal.
+        image_events = _event_matches(pod_events, ("ErrImagePull", "ImagePullBackOff", "pull image", "pulling image", "failed to pull"))
         probe_events = _event_matches(pod_events, ("Readiness probe failed", "Liveness probe failed", "Startup probe failed", "probe failed"))
         schedule_events = _event_matches(pod_events, ("FailedScheduling", "failedscheduling", "unschedulable"))
 
@@ -120,9 +119,7 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
                 "phase": phase,
                 "container_failures": failures,
                 "images": [x for x in images if x],
-                "warning_events": [
-                    {"reason": e.get("reason"), "message": e.get("message")} for e in pod_events
-                ],
+                "warning_events": [{"reason": e.get("reason"), "message": e.get("message")} for e in pod_events],
             }
             signal = "pod_unhealthy"
             if image_events or any(f.get("reason") in {"ErrImagePull", "ImagePullBackOff"} for f in failures):
@@ -137,9 +134,6 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
             severity = "HIGH" if signal in {"image_pull_failure", "probe_failure", "scheduling_failure"} else "MEDIUM"
             add(_evidence(signal, pod_resource, payload, severity, owners))
 
-            # If the pod has a controller owner, inspect the controller's actual
-            # spec. This is where probe paths, images and scheduling constraints
-            # are verified; no replacement values are invented.
             for owner_resource in owners:
                 okind, ons, oname = owner_resource.split("/", 2)
                 owner_result = toolkit.get_resource(okind, ons, oname)
@@ -147,7 +141,8 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
                     continue
                 owner_obj = (owner_result.get("data") or {}).get("resource") or {}
                 template = ((owner_obj.get("spec") or {}).get("template") or {})
-                containers = ((template.get("spec") or {}).get("containers") or [])
+                template_spec = template.get("spec") or {}
+                containers = template_spec.get("containers") or []
                 if signal == "image_pull_failure":
                     add(_evidence(
                         "image_reference",
@@ -170,32 +165,30 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
                     add(_evidence(
                         "scheduling_constraints",
                         owner_resource,
-                        {"node_selector": (template.get("spec") or {}).get("node_selector") or (template.get("spec") or {}).get("nodeSelector"),
-                         "affinity": (template.get("spec") or {}).get("affinity"),
-                         "tolerations": (template.get("spec") or {}).get("tolerations")},
+                        {
+                            "node_selector": template_spec.get("node_selector") or template_spec.get("nodeSelector"),
+                            "affinity": template_spec.get("affinity"),
+                            "tolerations": template_spec.get("tolerations"),
+                        },
                         "HIGH",
                         [pod_resource],
                     ))
 
-    # Deployment rollout state is independent evidence and is linked to the
-    # deployment, not every other workload in the namespace.
     for dep in deployments:
         meta, spec, status = dep.get("metadata") or {}, dep.get("spec") or {}, dep.get("status") or {}
         desired = spec.get("replicas", 0)
         ready = status.get("ready_replicas", status.get("readyReplicas", 0)) or 0
         available = status.get("available_replicas", status.get("availableReplicas", 0)) or 0
         conditions = status.get("conditions") or []
-        failed_progress = [c for c in conditions if c.get("type") == "Progressing" and c.get("reason") in {"ProgressDeadlineExceeded", "ProgressDeadlineExceeded"}]
+        failed_progress = [c for c in conditions if c.get("type") == "Progressing" and c.get("reason") == "ProgressDeadlineExceeded"]
         if ready != desired or available != desired or failed_progress:
-            resource = _resource("Deployment", dep)
             add(_evidence(
                 "deployment_rollout_failure",
-                resource,
+                _resource("Deployment", dep),
                 {"desired": desired, "ready": ready, "available": available, "conditions": conditions},
                 "HIGH",
             ))
 
-    # Service evidence explicitly ties selector -> matching pods -> endpoints.
     endpoints_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     for ep in _items(toolkit.list_resources("endpoints")):
         meta = ep.get("metadata") or {}
@@ -207,8 +200,7 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
         if spec.get("type") == "ExternalName" or not selector:
             continue
         ns, name = meta.get("namespace", "default"), meta.get("name", "unknown")
-        selector_query = _selector_string(selector)
-        matching_pods = _items(toolkit.list_resources("pod", namespace=ns, label_selector=selector_query))
+        matching_pods = _items(toolkit.list_resources("pod", namespace=ns, label_selector=_selector_string(selector)))
         ep = endpoints_by_key.get((ns, name)) or {}
         addresses = []
         not_ready = []
@@ -216,10 +208,9 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
             addresses.extend(subset.get("addresses") or [])
             not_ready.extend(subset.get("not_ready_addresses") or subset.get("notReadyAddresses") or [])
         if not matching_pods or not addresses:
-            resource = f"Service/{ns}/{name}"
             add(_evidence(
                 "service_routing_failure",
-                resource,
+                f"Service/{ns}/{name}",
                 {
                     "selector": selector,
                     "matching_pods": [_resource("Pod", p) for p in matching_pods],
@@ -231,7 +222,6 @@ def collect_operational_evidence(toolkit: K8sToolkit, limit: int = 100) -> list[
                 [_resource("Pod", p) for p in matching_pods] + [f"Endpoints/{ns}/{name}"],
             ))
 
-    # PVC evidence is deliberately limited to the claim and its events.
     for pvc in pvcs:
         status = pvc.get("status") or {}
         if status.get("phase") == "Bound":
