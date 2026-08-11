@@ -42,8 +42,7 @@ export default function SecuritySummary({ summary }: Props) {
   };
 
   const top = summary.top_10_risks || [];
-  const workloadCount =
-    summary.affected_workloads ?? summary.workload_count ?? 0;
+  const workloadCount = summary.affected_workloads ?? summary.workload_count ?? 0;
 
   return (
     <section className="rounded-2xl border border-slate-700/30 bg-slate-900/60 p-6 shadow-lg backdrop-blur">
@@ -51,6 +50,9 @@ export default function SecuritySummary({ summary }: Props) {
         <div>
           <h2 className="text-lg font-semibold text-slate-100">Security Findings</h2>
           <p className="text-sm text-slate-400">Prioritized by workload, not raw CVEs.</p>
+          {summary.score_basis && (
+            <p className="mt-1 max-w-2xl text-xs text-slate-500">Score: {summary.score_basis}</p>
+          )}
         </div>
         <div className="text-right">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Cluster Score</p>
@@ -97,6 +99,7 @@ export default function SecuritySummary({ summary }: Props) {
         <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
           <p className="text-[10px] uppercase tracking-wider text-slate-400">Unknown</p>
           <p className="text-lg font-semibold text-slate-100">{summary.unknown_vulnerabilities ?? 0}</p>
+          <p className="mt-1 text-[10px] text-slate-600">not scored</p>
         </div>
         <div className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
           <p className="text-[10px] uppercase tracking-wider text-slate-400">Namespaces</p>
@@ -124,46 +127,23 @@ export default function SecuritySummary({ summary }: Props) {
             const isOpen = expanded[idx];
             const total = SEVERITY_ORDER.reduce((acc, s) => acc + (w.counts?.[s] || 0), 0);
             return (
-              <div
-                key={idx}
-                className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"
-              >
-                <button
-                  onClick={() => toggle(idx)}
-                  className="flex w-full items-center justify-between text-left"
-                >
+              <div key={idx} className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4">
+                <button onClick={() => toggle(idx)} className="flex w-full items-center justify-between text-left">
                   <div>
-                    <p className="font-medium text-slate-100">
-                      {w.namespace}/{w.name}
-                    </p>
-                    <p className="text-xs text-slate-400">
-                      {total} findings · {w.recommendation}
-                    </p>
+                    <p className="font-medium text-slate-100">{w.namespace}/{w.name}</p>
+                    <p className="text-xs text-slate-400">{total} findings · {w.recommendation}</p>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="flex gap-2">
                       {SEVERITY_ORDER.map((s) =>
                         w.counts?.[s] ? (
-                          <span
-                            key={s}
-                            className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
-                              s === "CRITICAL"
-                                ? "bg-rose-500/20 text-rose-300"
-                                : s === "HIGH"
-                                ? "bg-orange-500/20 text-orange-300"
-                                : s === "MEDIUM"
-                                ? "bg-amber-500/20 text-amber-300"
-                                : "bg-emerald-500/20 text-emerald-300"
-                            }`}
-                          >
+                          <span key={s} className={`rounded-full px-2 py-0.5 text-xs font-semibold ${s === "CRITICAL" ? "bg-rose-500/20 text-rose-300" : s === "HIGH" ? "bg-orange-500/20 text-orange-300" : s === "MEDIUM" ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}`}>
                             {s}: {w.counts[s]}
                           </span>
                         ) : null
                       )}
                     </div>
-                    <span className="rounded-full bg-slate-800 px-2.5 py-1 text-xs font-semibold text-slate-300">
-                      {w.risk_score}
-                    </span>
+                    <span className="rounded-full bg-slate-800 px-2.5 py-1 text-xs font-semibold text-slate-300">{w.risk_score}</span>
                     <span className="text-slate-400">{isOpen ? "▲" : "▼"}</span>
                   </div>
                 </button>
@@ -174,33 +154,15 @@ export default function SecuritySummary({ summary }: Props) {
                       <ul className="space-y-2">
                         {w.findings.slice(0, 20).map((f, i) => (
                           <li key={i} className="text-sm text-slate-300">
-                            <span
-                              className={`mr-2 rounded px-1.5 py-0.5 text-xs font-semibold ${
-                                f.severity === "CRITICAL"
-                                  ? "bg-rose-500/20 text-rose-300"
-                                  : f.severity === "HIGH"
-                                  ? "bg-orange-500/20 text-orange-300"
-                                  : f.severity === "MEDIUM"
-                                  ? "bg-amber-500/20 text-amber-300"
-                                  : "bg-emerald-500/20 text-emerald-300"
-                              }`}
-                            >
+                            <span className={`mr-2 rounded px-1.5 py-0.5 text-xs font-semibold ${f.severity === "CRITICAL" ? "bg-rose-500/20 text-rose-300" : f.severity === "HIGH" ? "bg-orange-500/20 text-orange-300" : f.severity === "MEDIUM" ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}`}>
                               {f.severity}
                             </span>
-                            {f.category === "vulnerability" && f.cve_id ? (
-                              <span className="mr-2 font-mono text-slate-400">{f.cve_id}</span>
-                            ) : null}
+                            {f.category === "vulnerability" && f.cve_id ? <span className="mr-2 font-mono text-slate-400">{f.cve_id}</span> : null}
                             {f.title}
-                            {f.recommendation ? (
-                              <p className="mt-1 text-xs text-slate-500">{f.recommendation}</p>
-                            ) : null}
+                            {f.recommendation ? <p className="mt-1 text-xs text-slate-500">{f.recommendation}</p> : null}
                           </li>
                         ))}
-                        {w.findings.length > 20 && (
-                          <li className="text-xs text-slate-500">
-                            ... {w.findings.length - 20} more findings
-                          </li>
-                        )}
+                        {w.findings.length > 20 && <li className="text-xs text-slate-500">... {w.findings.length - 20} more findings</li>}
                       </ul>
                     ) : (
                       <p className="text-sm text-slate-500">No individual findings available.</p>
