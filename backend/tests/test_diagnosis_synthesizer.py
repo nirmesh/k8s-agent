@@ -1,4 +1,4 @@
-from backend.ai.diagnosis_synthesizer import validate_diagnosis
+from backend.ai.diagnosis_synthesizer import ensure_complete_findings, validate_diagnosis
 
 
 def _evidence(signal, resource, related=None):
@@ -28,3 +28,30 @@ def test_multiple_independent_findings_are_preserved():
     validated = validate_diagnosis(result, evidence)
     assert len(validated["findings"]) == 2
     assert validated["status"] == "DIAGNOSED"
+
+
+def test_missing_independent_deployment_incident_is_added_deterministically():
+    evidence = [
+        _evidence("probe_failure", "Pod/ai-test/readiness-pod"),
+        _evidence("probe_configuration", "Deployment/ai-test/readiness-app", ["Pod/ai-test/readiness-pod"]),
+        _evidence("image_pull_failure", "Pod/default/broken-pod", ["Deployment/default/web-app"]),
+        _evidence("image_reference", "Deployment/default/web-app", ["Pod/default/broken-pod"]),
+        _evidence("deployment_rollout_failure", "Deployment/default/web-app"),
+    ]
+    llm_result = {
+        "status": "DIAGNOSED",
+        "findings": [{
+            "incident_type": "readiness_probe_failure",
+            "root_cause": "Probe returned 404",
+            "affected_resources": ["Pod/ai-test/readiness-pod"],
+            "evidence_ids": ["probe_failure-1"],
+            "confidence": 0.96,
+        }],
+    }
+    validated = validate_diagnosis(llm_result, evidence)
+    complete = ensure_complete_findings(validated, evidence)
+    assert len(complete["findings"]) == 2
+    assert any(f["incident_type"] == "image_pull_failure" for f in complete["findings"])
+    assert not any(f["incident_type"] == "deployment_rollout_failure" for f in complete["findings"])
+    image_finding = next(f for f in complete["findings"] if f["incident_type"] == "image_pull_failure")
+    assert image_finding["affected_resources"] == ["Deployment/default/web-app"]
