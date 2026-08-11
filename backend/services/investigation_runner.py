@@ -24,7 +24,7 @@ def create_investigation(user_id: str) -> str:
         "root_cause": "",
         "namespace": "",
         "confidence": 0,
-        "remediation_plan": {"status": "NOT_REQUESTED"},
+        "remediation_plan": None,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -33,22 +33,14 @@ def create_investigation(user_id: str) -> str:
 
 
 def _progress_callback(db, investigation_id: str):
-    """Return a callback that writes a completed step to Mongo."""
     def callback(step: str):
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
             {
-                "$push": {
-                    "steps": {
-                        "name": step,
-                        "completed": True,
-                        "timestamp": datetime.now(timezone.utc),
-                    }
-                },
+                "$push": {"steps": {"name": step, "completed": True, "timestamp": datetime.now(timezone.utc)}},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
             },
         )
-
     return callback
 
 
@@ -56,14 +48,9 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
     """Run the read-only investigation and persist evidence and diagnosis."""
     set_context(context)
     db = get_db()
-    db.investigations.update_one(
-        {"_id": ObjectId(investigation_id)},
-        {"$set": {"status": "running"}},
-    )
-
+    db.investigations.update_one({"_id": ObjectId(investigation_id)}, {"$set": {"status": "running"}})
     try:
-        progress = _progress_callback(db, investigation_id)
-        result = run_investigation(progress_callback=progress, context=context)
+        result = run_investigation(progress_callback=_progress_callback(db, investigation_id), context=context)
         diagnosis = result.get("diagnosis", {})
         affected = diagnosis.get("affected_resources") or []
         namespace = ""
@@ -74,37 +61,29 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
 
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
-            {
-                "$set": {
-                    "status": "completed",
-                    "pods": result.get("pods", {}),
-                    "logs": result.get("logs", {}),
-                    "events": result.get("events", {}),
-                    "deployments": result.get("deployments", {}),
-                    "network": result.get("network", {}),
-                    "operational_evidence": result.get("operational_evidence", {}),
-                    "security_evidence": result.get("security_evidence", []),
-                    "security_summary": result.get("security_summary", {}),
-                    "diagnosis": diagnosis,
-                    "remediation_plan": result.get("remediation_plan", {"status": "NOT_REQUESTED"}),
-                    "root_cause": diagnosis.get("root_cause", ""),
-                    "namespace": namespace,
-                    "confidence": diagnosis.get("confidence", 0),
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
+            {"$set": {
+                "status": "completed",
+                "pods": result.get("pods", {}),
+                "logs": result.get("logs", {}),
+                "events": result.get("events", {}),
+                "deployments": result.get("deployments", {}),
+                "network": result.get("network", {}),
+                "operational_evidence": result.get("operational_evidence", []),
+                "security_evidence": result.get("security_evidence", []),
+                "security_summary": result.get("security_summary", {}),
+                "diagnosis": diagnosis,
+                "remediation_plan": None,
+                "root_cause": diagnosis.get("root_cause", ""),
+                "namespace": namespace,
+                "confidence": diagnosis.get("confidence", 0),
+                "updated_at": datetime.now(timezone.utc),
+            }},
         )
     except Exception as exc:
         logger.error(f"Investigation {investigation_id} failed: {exc}")
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
-            {
-                "$set": {
-                    "status": "failed",
-                    "error": str(exc),
-                    "updated_at": datetime.now(timezone.utc),
-                }
-            },
+            {"$set": {"status": "failed", "error": str(exc), "updated_at": datetime.now(timezone.utc)}},
         )
     finally:
         set_context(None)
