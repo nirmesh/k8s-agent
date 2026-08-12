@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from langgraph.graph import END, START, StateGraph
+from langsmith import traceable
+
+from backend.agentic.state import InvestigationState
+from backend.ai.diagnosis_synthesizer import ensure_complete_findings, synthesize, validate_diagnosis
+from backend.core.logging import logger
+from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.scoring import score_security_posture
+from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
+from backend.kubernetes.toolkit import K8sToolkit
+
+MAX_EXPANSION_PASSES = 1
+DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational incidents."
+
+
+@traceable(name="k8s.diagnosis.synthesis", run_type="llm")
+def _synthesize_with_trace(evidence: list[dict[str, Any]], incident: str) -> dict[str, Any]:
+    """Trace model synthesis as a nested LangSmith run."""
+    return synthesize(evidence, incident)
+
+
+def collect_operational_node(state: InvestigationState) -> dict[str, Any]:
+    toolkit = K8sToolkit(context=state.get("context"))
+    evidence = collect_operational_evidence(toolkit, limit=100)
+    logger.info("LangGraph collected {} operational evidence items", len(evidence))
+    return {"operational_evidence": evidence, "expansion_passes": 0}
+
+
+def collect_security_node(state: InvestigationState) -> dict[str, Any]:
+    # Security collection remains separate from operational root-cause reasoning.
+    toolkit = K8sToolkit(context=state.get("context"))
+    collection = SecurityEvidenceCollector(toolkit).collect()
+    security_evidence = collection.get("evidence") or []
+    security_summary = score_security_posture(collection.get("summary") or {})
+    return {
+        "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
+        "security_summary": security_summary,
+    }
+
+
+def diagnose_node(state: InvestigationState) -> dict[str, Any]:
+    verified = evidence_as_json(state.get("operational_evidence") or [])
+    incident = state.get("incident_description") or DEFAULT_INCIDENT
+
+    # The LLM receives verified operational evidence only. It does not call Kubernetes.
+    synthesis = _synthesize_with_trace(verified, incident)
+    synthesis = validate_diagnosis(synthesis, verified)
+    # Deterministic completion prevents the model from hiding independently verified incidents.
+    synthesis = ensure_complete_findings(synthesis, verified)
+    return {"synthesis": synthesis}
+
+
+def expand_evidence_node(state: InvestigationState) -> dict[str, Any]:
+    """Run one controlled second evidence pass; still read-only Kubernetes API calls."""
+    toolkit = K8sToolkit(context=state.get("context"))
+    expanded = collect_operational_evidence(toolkit, limit=250)
+
+    by_id = {str(item.get("id")): item for item in (state.get("operational_evidence") or [])}
+    for item in expanded:
+        by_id[str(item.get("id"))] = item
+
+    return {
+        "operational_evidence": list(by_id.values()),
+        "expansion_passes": int(state.get("expansion_passes", 0)) + 1,
+    }
+
+
+def route_after_diagnosis(state: InvestigationState) -> Literal["expand_evidence", "finish"]:
+    synthesis = state.get("synthesis") or {}
+    if synthesis.get("status") == "NEED_MORE_EVIDENCE" and int(state.get("expansion_passes", 0)) < MAX_EXPANSION_PASSES:
+        return "expand_evidence"
+    return "finish"
+
+
+def diagnosis_from_synthesis(result: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    findings = result.get("findings") or []
+    if not findings:
+        return {
+            "status": result.get("status", "NO_ISSUE"),
+            "root_cause": result.get("summary", "No verified operational issue was found."),
+            "explanation": result.get("summary", "No verified operational issue was found."),
+            "fix": "No remediation generated during investigation.",
+            "kubectl_command": "",
+            "prevention": "",
+            "confidence": 0.0,
+            "affected_resources": [],
+            "findings": [],
+            "evidence": [],
+        }
+
+    roots = [str(f.get("root_cause") or f.get("explanation") or "") for f in findings]
+    primary = findings[0]
+    explanation = primary.get("explanation") or primary.get("root_cause") or ""
+    if len(findings) > 1:
+        explanation += " Additional independent findings: " + " ".join(roots[1:])
+
+    evidence_by_id = {str(item.get("id")): item for item in evidence}
+    selected_evidence = [
+        evidence_by_id[eid]
+        for finding in findings
+        for eid in finding.get("evidence_ids", [])
+        if eid in evidence_by_id
+    ]
+
+    return {
+        "status": result.get("status", "DIAGNOSED"),
+        "root_cause": roots[0] if len(findings) == 1 else f"{len(findings)} independent incidents detected: " + " | ".join(roots),
+        "explanation": explanation,
+        "fix": "No remediation generated during investigation.",
+        "kubectl_command": "",
+        "prevention": "",
+        "confidence": max(float(f.get("confidence", 0.0) or 0.0) for f in findings),
+        "affected_resources": [
+            resource
+            for finding in findings
+            for resource in (finding.get("affected_resources") or [])
+        ],
+        "findings": findings,
+        "evidence": selected_evidence,
+    }
+
+
+def build_graph():
+    builder = StateGraph(InvestigationState)
+    builder.add_node("collect_operational", collect_operational_node)
+    builder.add_node("collect_security", collect_security_node)
+    builder.add_node("diagnose", diagnose_node)
+    builder.add_node("expand_evidence", expand_evidence_node)
+
+    builder.add_edge(START, "collect_operational")
+    builder.add_edge("collect_operational", "collect_security")
+    builder.add_edge("collect_security", "diagnose")
+    builder.add_conditional_edges(
+        "diagnose",
+        route_after_diagnosis,
+        {
+            "expand_evidence": "expand_evidence",
+            "finish": END,
+        },
+    )
+    builder.add_edge("expand_evidence", "diagnose")
+    return builder.compile()
+
+
+graph = build_graph()
