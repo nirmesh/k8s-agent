@@ -1,0 +1,7 @@
+{
+  "dependencies": [],
+  "graphs": {
+    "sre_investigation": "./backend/agentic/graph.py:graph"
+  },
+  "env": ".env"
+}
