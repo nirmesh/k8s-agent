@@ -1,66 +1,9 @@
 from collections.abc import Callable
 
-from backend.ai.diagnosis_synthesizer import ensure_complete_findings, synthesize, validate_diagnosis
+from backend.agentic.graph import diagnosis_from_synthesis, graph
 from backend.core.logging import logger
-from backend.evidence.security import SecurityEvidenceCollector
-from backend.evidence.security.scoring import score_security_posture
-from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
-from backend.kubernetes.toolkit import K8sToolkit
 
 DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational incidents."
-
-
-def _diagnosis_from_synthesis(result: dict, evidence: list[dict]) -> dict:
-    findings = result.get("findings") or []
-    if not findings:
-        return {
-            "status": result.get("status", "NO_ISSUE"),
-            "root_cause": result.get("summary", "No verified operational issue was found."),
-            "explanation": result.get("summary", "No verified operational issue was found."),
-            "fix": "No remediation generated during investigation.",
-            "kubectl_command": "",
-            "prevention": "",
-            "confidence": 0.0,
-            "affected_resources": [],
-            "findings": [],
-            "evidence": [],
-        }
-
-    primary, extra = findings[0], findings[1:]
-    root_causes = [str(f.get("root_cause") or f.get("explanation") or "") for f in findings]
-    if len(findings) == 1:
-        root_cause = root_causes[0]
-    else:
-        root_cause = f"{len(findings)} independent incidents detected: " + " | ".join(root_causes)
-
-    explanation = primary.get("explanation") or primary.get("root_cause") or ""
-    if extra:
-        explanation += " Additional independent findings: " + " ".join(root_causes[1:])
-
-    evidence_by_id = {str(item.get("id")): item for item in evidence}
-    selected_evidence = [
-        evidence_by_id[eid]
-        for finding in findings
-        for eid in finding.get("evidence_ids", [])
-        if eid in evidence_by_id
-    ]
-
-    return {
-        "status": result.get("status", "DIAGNOSED"),
-        "root_cause": root_cause,
-        "explanation": explanation,
-        "fix": "No remediation generated during investigation.",
-        "kubectl_command": "",
-        "prevention": "",
-        "confidence": max(float(f.get("confidence", 0.0) or 0.0) for f in findings),
-        "affected_resources": [
-            resource
-            for finding in findings
-            for resource in (finding.get("affected_resources") or [])
-        ],
-        "findings": findings,
-        "evidence": selected_evidence,
-    }
 
 
 def run_investigation(
@@ -68,31 +11,34 @@ def run_investigation(
     context: str | None = None,
     incident_description: str | None = None,
 ) -> dict:
-    """Read-only evidence-first investigation; remediation is a separate phase."""
-    logger.info("Starting evidence-driven SRE investigation")
-    toolkit = K8sToolkit(context=context)
+    """Run the read-only evidence-first investigation through LangGraph."""
+    logger.info("Starting LangGraph evidence-driven SRE investigation")
+
     if progress_callback:
         progress_callback("Checking Pods")
-    operational_evidence = collect_operational_evidence(toolkit)
+
+    state = graph.invoke(
+        {
+            "context": context,
+            "incident_description": incident_description or DEFAULT_INCIDENT,
+        }
+    )
+
+    evidence = state.get("operational_evidence") or []
+    synthesis = state.get("synthesis") or {
+        "status": "NO_ISSUE",
+        "summary": "No verified operational issue was found.",
+        "findings": [],
+    }
+
     if progress_callback:
         progress_callback("Analyzing Events")
         progress_callback("Inspecting Deployments")
         progress_callback("Checking Networking")
-
-    security_collection = SecurityEvidenceCollector(toolkit).collect()
-    security_evidence = security_collection.get("evidence") or []
-    security_summary = score_security_posture(security_collection.get("summary") or {})
-    if progress_callback:
         progress_callback("AI Reasoning")
 
-    verified = evidence_as_json(operational_evidence)
-    synthesis = synthesize(verified, incident_description or DEFAULT_INCIDENT)
-    synthesis = validate_diagnosis(synthesis, verified)
-    # The LLM is a synthesis layer, not the source of truth for incident count.
-    # If it omits an independently verified incident, add a deterministic,
-    # evidence-grounded finding rather than silently dropping the incident.
-    synthesis = ensure_complete_findings(synthesis, verified)
-    diagnosis = _diagnosis_from_synthesis(synthesis, verified)
+    diagnosis = diagnosis_from_synthesis(synthesis, evidence)
+
     if progress_callback:
         progress_callback("Root Cause Found")
 
@@ -101,12 +47,12 @@ def run_investigation(
         "logs": {},
         "events": {},
         "deployments": {},
-        "network": {"signals": operational_evidence},
-        "operational_evidence": operational_evidence,
-        "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
-        "security_summary": security_summary,
+        "network": {"signals": evidence},
+        "operational_evidence": evidence,
+        "security_evidence": state.get("security_evidence") or [],
+        "security_summary": state.get("security_summary") or {},
         "diagnosis": diagnosis,
         "remediation_plan": None,
         "trace": [],
-        "signals": operational_evidence,
+        "signals": evidence,
     }
