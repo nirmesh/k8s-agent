@@ -12,6 +12,7 @@ from backend.evidence.security import SecurityEvidenceCollector
 from backend.evidence.security.scoring import score_security_posture
 from backend.kubernetes.incident_correlator import correlate_incidents
 from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
+from backend.kubernetes.llm_projection import project_incidents_for_llm
 from backend.kubernetes.toolkit import K8sToolkit
 
 MAX_EXPANSION_PASSES = 1
@@ -35,7 +36,11 @@ def normalize_and_correlate_node(state: InvestigationState) -> dict[str, Any]:
     evidence = evidence_as_json(state.get("operational_evidence") or [])
     incidents = correlate_incidents(evidence)
     logger.info("LangGraph correlated {} raw evidence items into {} independent incidents", len(evidence), len(incidents))
-    return {"normalized_evidence": evidence, "correlated_incidents": incidents}
+    return {
+        "normalized_evidence": evidence,
+        "correlated_incidents": incidents,
+        "llm_incidents": project_incidents_for_llm(incidents),
+    }
 
 
 def collect_security_node(state: InvestigationState) -> dict[str, Any]:
@@ -52,13 +57,12 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
 def diagnose_node(state: InvestigationState) -> dict[str, Any]:
     evidence = evidence_as_json(state.get("operational_evidence") or [])
     incidents = state.get("correlated_incidents") or []
+    llm_incidents = state.get("llm_incidents") or project_incidents_for_llm(incidents)
     incident = state.get("incident_description") or DEFAULT_INCIDENT
 
-    # The LLM receives correlated incidents, not raw Kubernetes observations.
-    synthesis = _synthesize_with_trace(incidents, incident)
+    # The LLM receives compact semantic incidents, not raw Kubernetes observations.
+    synthesis = _synthesize_with_trace(llm_incidents, incident)
     synthesis = validate_diagnosis(synthesis, evidence)
-    # Deterministic completeness guarantees that a verified incident cannot disappear
-    # merely because the model omitted it from its response.
     synthesis = ensure_complete_findings_from_incidents(synthesis, incidents)
     return {"synthesis": synthesis}
 
@@ -70,10 +74,12 @@ def expand_evidence_node(state: InvestigationState) -> dict[str, Any]:
     for item in expanded:
         by_id[str(item.get("id"))] = item
     evidence = list(by_id.values())
+    incidents = correlate_incidents(evidence)
     return {
         "operational_evidence": evidence,
         "normalized_evidence": evidence,
-        "correlated_incidents": correlate_incidents(evidence),
+        "correlated_incidents": incidents,
+        "llm_incidents": project_incidents_for_llm(incidents),
         "expansion_passes": int(state.get("expansion_passes", 0)) + 1,
     }
 
@@ -105,7 +111,7 @@ def diagnosis_from_synthesis(result: dict[str, Any], evidence: list[dict[str, An
     primary = findings[0]
     explanation = primary.get("explanation") or primary.get("root_cause") or ""
     if len(findings) > 1:
-        explanation += " Additional independent findings: " + " ".join(roots[1:])
+        explanation += " Additional independent findings: " + " | ".join(roots[1:])
 
     evidence_by_id = {str(item.get("id")): item for item in evidence}
     selected_evidence = [
@@ -144,10 +150,7 @@ def build_graph():
     builder.add_conditional_edges(
         "diagnose",
         route_after_diagnosis,
-        {
-            "expand_evidence": "expand_evidence",
-            "finish": END,
-        },
+        {"expand_evidence": "expand_evidence", "finish": END},
     )
     builder.add_edge("expand_evidence", "normalize_and_correlate")
     return builder.compile()
