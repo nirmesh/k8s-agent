@@ -36,11 +36,7 @@ def normalize_and_correlate_node(state: InvestigationState) -> dict[str, Any]:
     evidence = evidence_as_json(state.get("operational_evidence") or [])
     incidents = correlate_incidents(evidence)
     logger.info("LangGraph correlated {} raw evidence items into {} independent incidents", len(evidence), len(incidents))
-    return {
-        "normalized_evidence": evidence,
-        "correlated_incidents": incidents,
-        "llm_incidents": project_incidents_for_llm(incidents),
-    }
+    return {"normalized_evidence": evidence, "correlated_incidents": incidents}
 
 
 def collect_security_node(state: InvestigationState) -> dict[str, Any]:
@@ -57,7 +53,7 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
 def diagnose_node(state: InvestigationState) -> dict[str, Any]:
     evidence = evidence_as_json(state.get("operational_evidence") or [])
     incidents = state.get("correlated_incidents") or []
-    llm_incidents = state.get("llm_incidents") or project_incidents_for_llm(incidents)
+    llm_incidents = project_incidents_for_llm(incidents)
     incident = state.get("incident_description") or DEFAULT_INCIDENT
 
     # The LLM receives compact semantic incidents, not raw Kubernetes observations.
@@ -79,7 +75,6 @@ def expand_evidence_node(state: InvestigationState) -> dict[str, Any]:
         "operational_evidence": evidence,
         "normalized_evidence": evidence,
         "correlated_incidents": incidents,
-        "llm_incidents": project_incidents_for_llm(incidents),
         "expansion_passes": int(state.get("expansion_passes", 0)) + 1,
     }
 
