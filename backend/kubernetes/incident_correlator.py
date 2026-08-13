@@ -1,48 +1,52 @@
 from __future__ import annotations
 
-from collections import defaultdict
+import re
 from typing import Any
 
 WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob"}
 PRIMARY_SIGNALS = {
-    "image_pull_failure",
-    "probe_failure",
-    "scheduling_failure",
-    "service_routing_failure",
-    "pvc_binding_failure",
-    "pod_unhealthy",
-    "deployment_rollout_failure",
+    "image_pull_failure", "probe_failure", "scheduling_failure", "service_routing_failure",
+    "pvc_binding_failure", "pod_unhealthy", "deployment_rollout_failure",
 }
 CONSEQUENCE_SIGNALS = {"deployment_rollout_failure"}
-CAUSE_SIGNALS = {"image_pull_failure", "probe_failure", "scheduling_failure", "service_routing_failure", "pvc_binding_failure", "pod_unhealthy"}
+CAUSE_SIGNALS = PRIMARY_SIGNALS - CONSEQUENCE_SIGNALS
 
 
-def _kind(resource: str) -> str:
-    return resource.split("/", 1)[0] if resource else ""
-
-
-def _ns_name(resource: str) -> tuple[str, str]:
+def _parts(resource: str) -> tuple[str, str, str]:
     parts = resource.split("/", 2)
-    if len(parts) != 3:
-        return "", ""
-    return parts[1], parts[2]
+    return (parts[0], parts[1], parts[2]) if len(parts) == 3 else ("", "", "")
 
 
-def _workload_from_relationships(item: dict[str, Any], resources: set[str]) -> str:
-    resource = str(item.get("resource") or "")
-    related = [str(x) for x in item.get("related_resources") or []]
-    candidates = [resource, *related]
-    for candidate in candidates:
-        if candidate in resources and _kind(candidate) in WORKLOAD_KINDS:
-            return candidate
-    return resource
+def _canonical_name(kind: str, name: str) -> str:
+    if kind == "ReplicaSet":
+        match = re.match(r"^(.+)-[a-z0-9]{5,12}$", name)
+        return match.group(1) if match else name
+    if kind == "Pod":
+        match = re.match(r"^(.+)-[a-z0-9]{5,12}-[a-z0-9]{4,12}$", name)
+        if match:
+            return _canonical_name("ReplicaSet", match.group(1))
+    return name
 
 
-def _incident_for_workload(workload: str, signal: str) -> str:
-    return f"{signal}:{workload}"
+def _workload_key(resource: str) -> tuple[str, str]:
+    kind, namespace, name = _parts(resource)
+    return namespace, _canonical_name(kind, name)
 
 
-def _merge_incident(incident: dict[str, Any], item: dict[str, Any], resources: set[str]) -> None:
+def _resource_for_key(resources: set[str], key: tuple[str, str]) -> str:
+    namespace, canonical = key
+    candidates: list[str] = []
+    for resource in resources:
+        kind, ns, name = _parts(resource)
+        if ns == namespace and _canonical_name(kind, name) == canonical:
+            if kind == "Deployment":
+                return resource
+            if kind in {"StatefulSet", "DaemonSet", "Job", "CronJob", "ReplicaSet"}:
+                candidates.append(resource)
+    return sorted(candidates)[0] if candidates else f"Deployment/{namespace}/{canonical}"
+
+
+def _merge(incident: dict[str, Any], item: dict[str, Any]) -> None:
     evidence_id = str(item.get("id"))
     if evidence_id not in incident["evidence_ids"]:
         incident["evidence_ids"].append(evidence_id)
@@ -53,162 +57,123 @@ def _merge_incident(incident: dict[str, Any], item: dict[str, Any], resources: s
         related = str(related)
         if related and related not in incident["resources"]:
             incident["resources"].append(related)
-    payload = item.get("payload") or {}
+
     signal = str(item.get("signal") or "")
+    payload = item.get("payload") or {}
     if signal == "probe_failure":
-        incident["facts"]["probe_failure"] = payload.get("probe_events") or payload.get("warning_events") or []
-        incident["facts"]["affected_pods"] = [resource]
+        incident["facts"]["probe_failures"] = (incident["facts"].get("probe_failures") or []) + (payload.get("probe_events") or payload.get("warning_events") or [])
     elif signal == "probe_configuration":
         incident["facts"]["probe_configuration"] = payload.get("containers") or []
     elif signal == "image_pull_failure":
         incident["facts"]["image_pull_failures"] = (incident["facts"].get("image_pull_failures") or []) + [{"resource": resource, "events": payload.get("image_events") or payload.get("warning_events") or [], "images": payload.get("images") or []}]
-        for image in payload.get("images") or []:
-            if image and "image" not in incident["facts"]:
-                incident["facts"]["image"] = image
     elif signal == "image_reference":
-        refs = payload.get("containers") or []
-        incident["facts"]["image_references"] = refs
-        for ref in refs:
-            image = ref.get("image")
-            if image:
-                incident["facts"]["image"] = image
+        incident["facts"]["image_references"] = payload.get("containers") or []
     elif signal == "scheduling_failure":
         incident["facts"]["scheduling_events"] = payload.get("scheduling_events") or payload.get("warning_events") or []
     elif signal == "scheduling_constraints":
         incident["facts"]["scheduling_constraints"] = payload
     elif signal == "service_routing_failure":
-        incident["facts"].update({
-            "selector": payload.get("selector"),
-            "matching_pods": payload.get("matching_pods"),
-            "ready_endpoint_count": payload.get("ready_endpoint_count"),
-            "not_ready_endpoint_count": payload.get("not_ready_endpoint_count"),
-        })
+        incident["facts"].update({"selector": payload.get("selector"), "matching_pods": payload.get("matching_pods"), "ready_endpoint_count": payload.get("ready_endpoint_count"), "not_ready_endpoint_count": payload.get("not_ready_endpoint_count")})
     elif signal == "pvc_binding_failure":
         incident["facts"].update({"phase": payload.get("phase"), "warning_events": payload.get("warning_events") or []})
     elif signal == "deployment_rollout_failure":
-        incident["facts"].update({
-            "desired": payload.get("desired"),
-            "ready": payload.get("ready"),
-            "available": payload.get("available"),
-            "conditions": payload.get("conditions") or [],
-        })
-
-
-def _can_link(candidate: dict[str, Any], cause: dict[str, Any]) -> bool:
-    if cause["signal"] not in CAUSE_SIGNALS:
-        return False
-    if candidate["signal"] not in CONSEQUENCE_SIGNALS:
-        return False
-    candidate_workload = candidate["workload"]
-    cause_workload = cause["workload"]
-    if candidate_workload == cause_workload:
-        return True
-    candidate_related = set(candidate.get("related_resources") or [])
-    cause_resources = set(cause.get("resources") or [])
-    return bool(candidate_related & cause_resources)
+        incident["facts"].update({"desired": payload.get("desired"), "ready": payload.get("ready"), "available": payload.get("available"), "conditions": payload.get("conditions") or []})
 
 
 def correlate_incidents(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize raw operational evidence into independent incidents.
-
-    Multiple replicas and low-level evidence items are collapsed into one incident
-    per root workload/signal. Deployment rollout failures are attached as consequences
-    when the same workload already has a more specific cause signal.
-    """
+    """Collapse low-level observations into workload-level independent incidents."""
     resources = {str(item.get("resource")) for item in evidence if item.get("resource")}
-    groups: dict[tuple[str, str], dict[str, Any]] = {}
-    raw_items: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
 
     for item in evidence:
         signal = str(item.get("signal") or "")
         if signal not in PRIMARY_SIGNALS and signal not in {"probe_configuration", "image_reference", "scheduling_constraints"}:
             continue
         resource = str(item.get("resource") or "")
-        workload = _workload_from_relationships(item, resources)
-        if signal in {"probe_configuration", "image_reference", "scheduling_constraints"}:
-            # Attach supporting evidence to the most likely primary incident on the same workload.
-            raw_items.append({"item": item, "signal": signal, "workload": workload, "resource": resource, "supporting": True})
-            continue
-        raw = {"item": item, "signal": signal, "workload": workload, "resource": resource, "related_resources": [str(x) for x in item.get("related_resources") or []]}
-        raw_items.append(raw)
+        records.append({
+            "item": item,
+            "signal": signal,
+            "resource": resource,
+            "key": _workload_key(resource),
+            "supporting": signal not in PRIMARY_SIGNALS,
+        })
 
-        if signal == "deployment_rollout_failure":
+    keys = {r["key"] for r in records if r["key"] != ("", "")}
+    root_by_key = {key: _resource_for_key(resources, key) for key in keys}
+    groups: dict[tuple[str, tuple[str, str]], dict[str, Any]] = {}
+
+    for record in records:
+        signal, key = record["signal"], record["key"]
+        if record["supporting"] or signal in CONSEQUENCE_SIGNALS:
             continue
-        key = (signal, workload)
-        if key not in groups:
-            groups[key] = {
-                "incident_id": f"{signal}:{workload}",
+        group_key = (signal, key)
+        if group_key not in groups:
+            root = root_by_key.get(key, record["resource"])
+            groups[group_key] = {
+                "incident_id": f"{signal}:{root}",
                 "type": signal,
-                "root_resource": workload,
+                "root_resource": root,
                 "resources": [],
                 "evidence_ids": [],
                 "affected_pods": [],
                 "facts": {},
                 "consequences": [],
             }
-        _merge_incident(groups[key], item, resources)
+        _merge(groups[group_key], record["item"])
 
-    # Attach supporting evidence such as probe configuration and image references.
-    for raw in raw_items:
-        if not raw.get("supporting"):
+    # Attach supporting evidence to the primary incident for the same workload.
+    preferred_by_signal = {
+        "probe_configuration": "probe_failure",
+        "image_reference": "image_pull_failure",
+        "scheduling_constraints": "scheduling_failure",
+    }
+    for record in records:
+        if not record["supporting"]:
             continue
-        item = raw["item"]
-        workload = raw["workload"]
-        candidate_groups = [g for g in groups.values() if g["root_resource"] == workload]
-        if not candidate_groups:
-            continue
-        # Prefer a matching cause type when possible.
-        if raw["signal"] == "probe_configuration":
-            preferred = [g for g in candidate_groups if g["type"] == "probe_failure"]
-        elif raw["signal"] == "image_reference":
-            preferred = [g for g in candidate_groups if g["type"] == "image_pull_failure"]
-        else:
-            preferred = [g for g in candidate_groups if g["type"] == "scheduling_failure"]
-        target = preferred[0] if preferred else candidate_groups[0]
-        _merge_incident(target, item, resources)
+        target = groups.get((preferred_by_signal[record["signal"]], record["key"]))
+        if target:
+            _merge(target, record["item"])
 
-    # Convert rollout failures into consequences where a specific cause exists;
-    # otherwise preserve the rollout failure as its own incident.
-    for raw in raw_items:
-        if raw["signal"] != "deployment_rollout_failure":
+    # Rollout failures are consequences when a more-specific cause exists for the same workload.
+    for record in records:
+        if record["signal"] != "deployment_rollout_failure":
             continue
-        item = raw["item"]
-        candidate = {
-            "signal": raw["signal"],
-            "workload": raw["workload"],
-            "related_resources": raw.get("related_resources") or [],
-            "resources": [str(item.get("resource") or "")],
-        }
-        causes = [g for g in groups.values() if _can_link(candidate, g)]
+        key = record["key"]
+        causes = [g for (signal, gkey), g in groups.items() if gkey == key and signal in CAUSE_SIGNALS]
         if causes:
             for cause in causes:
-                _merge_incident(cause, item, resources)
-                consequence = {"signal": "deployment_rollout_failure", "resource": str(item.get("resource") or ""), "evidence_id": str(item.get("id")), "reason": "same workload has fewer ready/available replicas while a more specific verified failure is present"}
-                if consequence not in cause["consequences"]:
-                    cause["consequences"].append(consequence)
+                _merge(cause, record["item"])
+                cause["consequences"].append({
+                    "signal": "deployment_rollout_failure",
+                    "resource": record["resource"],
+                    "evidence_id": str(record["item"].get("id")),
+                    "reason": "same workload has a more specific verified failure",
+                })
         else:
-            key = ("deployment_rollout_failure", raw["workload"])
-            groups[key] = {
-                "incident_id": f"deployment_rollout_failure:{raw['workload']}",
+            root = root_by_key.get(key, record["resource"])
+            group_key = ("deployment_rollout_failure", key)
+            groups[group_key] = {
+                "incident_id": f"deployment_rollout_failure:{root}",
                 "type": "deployment_rollout_failure",
-                "root_resource": raw["workload"],
+                "root_resource": root,
                 "resources": [],
                 "evidence_ids": [],
                 "affected_pods": [],
                 "facts": {},
                 "consequences": [],
             }
-            _merge_incident(groups[key], item, resources)
+            _merge(groups[group_key], record["item"])
 
     incidents = list(groups.values())
     for incident in incidents:
         pods = set(incident.get("affected_pods") or [])
-        for evidence_id in incident.get("evidence_ids") or []:
+        for evidence_id in incident["evidence_ids"]:
             item = next((e for e in evidence if str(e.get("id")) == evidence_id), None)
             if item and str(item.get("resource") or "").startswith("Pod/"):
                 pods.add(str(item.get("resource")))
         incident["affected_pods"] = sorted(pods)
-        incident["resources"] = sorted(set(incident.get("resources") or []))
-        incident["evidence_ids"] = sorted(set(incident.get("evidence_ids") or []))
-        incident["consequences"] = sorted(incident.get("consequences") or [], key=lambda x: x.get("evidence_id", ""))
+        incident["resources"] = sorted(set(incident["resources"]))
+        incident["evidence_ids"] = sorted(set(incident["evidence_ids"]))
+        incident["consequences"] = sorted(incident["consequences"], key=lambda x: x.get("evidence_id", ""))
+
     return sorted(incidents, key=lambda x: (x["root_resource"], x["type"]))
