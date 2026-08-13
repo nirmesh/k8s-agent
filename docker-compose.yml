@@ -20,6 +20,11 @@ services:
       - OLLAMA_JSON_FORMAT=false
       - KUBECONFIG=/root/.kube/config
       - KUBECONFIG_PATH=/root/.kube/config
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-ai-k9s}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      - DEBUG_LLM_PROMPT=${DEBUG_LLM_PROMPT:-false}
     depends_on:
       - mongo
     volumes:
@@ -42,6 +47,7 @@ services:
       - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
       - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-ai-k9s}
       - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      - DEBUG_LLM_PROMPT=${DEBUG_LLM_PROMPT:-false}
       - LANGGRAPH_HOST=0.0.0.0
       - LANGGRAPH_PORT=2024
     depends_on:
