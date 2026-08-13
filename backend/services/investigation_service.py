@@ -17,14 +17,10 @@ def run_investigation(
     if progress_callback:
         progress_callback("Checking Pods")
 
-    state = graph.invoke(
-        {
-            "context": context,
-            "incident_description": incident_description or DEFAULT_INCIDENT,
-        }
-    )
+    state = graph.invoke({"context": context, "incident_description": incident_description or DEFAULT_INCIDENT})
 
     evidence = state.get("operational_evidence") or []
+    incidents = state.get("correlated_incidents") or []
     synthesis = state.get("synthesis") or {
         "status": "NO_ISSUE",
         "summary": "No verified operational issue was found.",
@@ -49,6 +45,7 @@ def run_investigation(
         "deployments": {},
         "network": {"signals": evidence},
         "operational_evidence": evidence,
+        "correlated_incidents": incidents,
         "security_evidence": state.get("security_evidence") or [],
         "security_summary": state.get("security_summary") or {},
         "diagnosis": diagnosis,
