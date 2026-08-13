@@ -77,10 +77,7 @@ def _call_model(payload: dict[str, Any]) -> dict[str, Any]:
 def synthesize_incidents(incidents: list[dict[str, Any]], incident: str | None = None) -> dict[str, Any]:
     if not incidents:
         return {"status": "NO_ISSUE", "summary": "No operational anomalies were verified.", "findings": []}
-    payload = {
-        "incident": incident or "Cluster investigation",
-        "VERIFIED_INCIDENTS": incidents,
-    }
+    payload = {"incident": incident or "Cluster investigation", "VERIFIED_INCIDENTS": incidents}
     return _call_model(payload)
 
 
@@ -104,7 +101,6 @@ def validate_diagnosis(result: dict[str, Any], evidence: list[dict[str, Any]]) -
         resources = [str(x) for x in finding.get("affected_resources") or [] if str(x) in valid_resources]
         if not evidence_ids or not resources:
             continue
-        # Every referenced evidence item must belong to the same resource set or be explicitly related.
         if not any(item.get("resource") in resources or set(item.get("related_resources") or []) & set(resources) for item in (by_id[eid] for eid in evidence_ids)):
             continue
         finding["evidence_ids"] = evidence_ids
