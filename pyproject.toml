@@ -1,0 +1,23 @@
+[project]
+name = "ai-k9s-agent"
+version = "0.1.0"
+description = "AI-K9s Kubernetes SRE investigation agent"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "pydantic-settings",
+  "loguru",
+  "httpx",
+  "python-dotenv",
+  "pymongo",
+  "pyyaml",
+  "kubernetes>=29.0.0",
+  "pytest",
+  "langgraph>=1.0,<2.0",
+  "langsmith>=0.4,<1.0",
+]
+
+[tool.setuptools]
+packages = ["backend"]
