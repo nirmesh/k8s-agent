@@ -7,7 +7,9 @@ services:
       - mongo_data:/data/db
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.langgraph
     network_mode: host
     env_file:
       - ./backend/.env
@@ -23,16 +25,42 @@ services:
     volumes:
       - ~/.kube/config:/root/.kube/config:ro
 
+  langgraph:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.langgraph
+    network_mode: host
+    env_file:
+      - ./backend/.env
+    environment:
+      - OLLAMA_HOST=http://localhost:11434
+      - OLLAMA_MODEL=gpt-oss:120b
+      - OLLAMA_JSON_FORMAT=false
+      - KUBECONFIG=/root/.kube/config
+      - KUBECONFIG_PATH=/root/.kube/config
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-ai-k9s}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+    depends_on:
+      - mongo
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro
+      - ./langgraph.json:/app/langgraph.json:ro
+    command: ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--config", "/app/langgraph.json"]
+
   frontend:
     build: ./frontend
     ports:
       - "3000:3000"
     environment:
       - API_PROXY_URL=http://host.docker.internal:8000
+      - LANGGRAPH_URL=http://host.docker.internal:2024
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - backend
+      - langgraph
 
 volumes:
   mongo_data:
