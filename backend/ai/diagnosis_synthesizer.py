@@ -9,20 +9,20 @@ from backend.core.logging import logger
 
 SYSTEM_PROMPT = """You are the diagnosis synthesis layer of a Kubernetes SRE agent.
 
-You are NOT a Kubernetes API navigator. You receive VERIFIED, STRUCTURED evidence collected by deterministic investigators.
+You are NOT a Kubernetes API navigator. You receive VERIFIED, CORRELATED incidents produced by deterministic Kubernetes investigators.
 
 Hard rules:
-- Use only facts present in VERIFIED_EVIDENCE.
+- Use only facts present in VERIFIED_INCIDENTS and their evidence_ids.
 - Never invent resources, namespaces, image tags, selectors, probe paths, ports, commands, CVEs, or fixes.
-- Do not merge evidence from unrelated resources just because they are in the same namespace.
-- Prefer explicit resource relationships: owner, selector match, Endpoint/EndpointSlice membership, pod ownership, or the same involvedObject.
-- A security finding is not an operational root cause unless the evidence explicitly establishes the causal relationship.
-- If multiple independent incidents exist, return one finding for EACH independent incident. Do not return only the single most severe incident.
-- Every independent operational signal in VERIFIED_EVIDENCE must either be represented by a finding or be explicitly explained as a consequence/symptom of another finding on the same resource relationship.
-- A deployment rollout failure caused by a verified probe/image/scheduling failure on the same workload is a consequence, not a second incident. An unrelated broken Deployment MUST remain a separate finding.
-- If evidence is insufficient or contradictory, return NEED_MORE_EVIDENCE.
+- Do not merge unrelated incidents just because they are in the same namespace or use the same image.
+- Each object in VERIFIED_INCIDENTS is already an independently correlated operational incident.
+- Return one finding for EACH verified incident. Do not collapse multiple incidents into one summary.
+- Do not create additional incidents that are not present in VERIFIED_INCIDENTS.
+- Treat items listed under an incident's consequences as symptoms/consequences, not separate incidents.
+- If a verified incident lacks enough detail for a precise explanation, preserve the incident and say NEED_MORE_EVIDENCE for that finding.
+- A security finding is not an operational root cause unless explicitly present in the operational incidents supplied here.
 - Do not propose remediation. The investigation phase only explains what is wrong and why.
-- Confidence is your confidence in the diagnosis, not the severity of the issue.
+- Confidence is confidence in the diagnosis, not severity.
 
 Return ONLY JSON:
 {
@@ -30,12 +30,13 @@ Return ONLY JSON:
   "summary": "short human-readable summary",
   "findings": [
     {
-      "incident_type": "stable signal name",
+      "incident_id": "exact incident_id from VERIFIED_INCIDENTS",
+      "incident_type": "exact incident type",
       "root_cause": "one evidence-grounded sentence",
       "explanation": "short causal explanation",
       "confidence": 0.0,
-      "affected_resources": ["Kind/namespace/name"],
-      "evidence_ids": ["evidence-id"]
+      "affected_resources": ["exact resources from incident"],
+      "evidence_ids": ["exact evidence ids from incident"]
     }
   ]
 }
@@ -56,10 +57,7 @@ def _log_llm_input(payload: dict[str, Any]) -> None:
     logger.warning("=== LLM INPUT END ===")
 
 
-def synthesize(evidence: list[dict[str, Any]], incident: str | None = None) -> dict[str, Any]:
-    if not evidence:
-        return {"status": "NO_ISSUE", "summary": "No operational anomalies were verified.", "findings": []}
-    payload = {"incident": incident or "Cluster investigation", "VERIFIED_EVIDENCE": evidence}
+def _call_model(payload: dict[str, Any]) -> dict[str, Any]:
     _log_llm_input(payload)
     message = chat(
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": json.dumps(payload, default=str)}],
@@ -75,137 +73,42 @@ def synthesize(evidence: list[dict[str, Any]], incident: str | None = None) -> d
         return {"status": "NEED_MORE_EVIDENCE", "summary": "The diagnosis model returned an invalid result.", "findings": []}
     return result
 
-_SIGNAL_ALIASES = {
-    "image": {"image_pull_failure", "image_reference"}, "pull": {"image_pull_failure", "image_reference"},
-    "probe": {"probe_failure", "probe_configuration", "deployment_rollout_failure"}, "readiness": {"probe_failure", "probe_configuration", "deployment_rollout_failure"},
-    "liveness": {"probe_failure", "probe_configuration", "deployment_rollout_failure"}, "startup": {"probe_failure", "probe_configuration", "deployment_rollout_failure"},
-    "schedule": {"scheduling_failure", "scheduling_constraints"}, "scheduling": {"scheduling_failure", "scheduling_constraints"},
-    "service": {"service_routing_failure"}, "endpoint": {"service_routing_failure"},
-    "pvc": {"pvc_binding_failure"}, "storage": {"pvc_binding_failure"},
-    "deployment": {"deployment_rollout_failure"}, "rollout": {"deployment_rollout_failure"},
-    "pod": {"pod_unhealthy", "image_pull_failure", "probe_failure", "scheduling_failure"},
-}
 
-PRIMARY_SIGNALS = {
-    "image_pull_failure",
-    "probe_failure",
-    "scheduling_failure",
-    "service_routing_failure",
-    "pvc_binding_failure",
-    "pod_unhealthy",
-    "deployment_rollout_failure",
-}
-
-
-def _finding_is_grounded(finding: dict[str, Any], by_id: dict[str, dict[str, Any]], valid_resources: set[str]) -> bool:
-    evidence_ids = [str(x) for x in finding.get("evidence_ids") or [] if str(x) in by_id]
-    resources = [str(x) for x in finding.get("affected_resources") or [] if str(x) in valid_resources]
-    if not evidence_ids or not resources:
-        return False
-    incident_type = str(finding.get("incident_type") or "").lower()
-    relevant_signals: set[str] = set()
-    for alias, signals in _SIGNAL_ALIASES.items():
-        if alias in incident_type:
-            relevant_signals.update(signals)
-    cited = [by_id[eid] for eid in evidence_ids]
-    cited_signals = {str(item.get("signal")) for item in cited}
-    if relevant_signals and not (cited_signals & relevant_signals):
-        return False
-    return any(item.get("resource") in resources or set(item.get("related_resources") or []) & set(resources) for item in cited)
-
-
-def _workload_resource(item: dict[str, Any], valid_resources: set[str]) -> str:
-    resource = str(item.get("resource") or "")
-    for related in item.get("related_resources") or []:
-        related = str(related)
-        if related in valid_resources and related.split("/", 1)[0] in {"Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job", "CronJob"}:
-            return related
-    return resource
-
-
-def _deterministic_finding(item: dict[str, Any], valid_resources: set[str]) -> dict[str, Any]:
-    signal = str(item.get("signal"))
-    resource = _workload_resource(item, valid_resources)
-    if signal == "image_pull_failure":
-        root = f"{resource} has a container image pull failure; the verified Pod evidence shows the image could not be pulled."
-        explanation = "The Kubernetes Pod/container status or scoped Warning events contain image-pull-specific failure evidence."
-        incident_type = "image_pull_failure"
-    elif signal == "probe_failure":
-        root = f"{resource} has a failing health probe; the verified Pod evidence shows the configured probe is failing."
-        explanation = "The affected Pod has a scoped probe failure event, and the owning workload configuration was captured as evidence."
-        incident_type = "probe_failure"
-    elif signal == "scheduling_failure":
-        root = f"{resource} has a scheduling failure preventing the workload from being placed on a node."
-        explanation = "The affected Pod has a scoped FailedScheduling or unschedulable event."
-        incident_type = "scheduling_failure"
-    elif signal == "service_routing_failure":
-        root = f"{resource} has no usable Service routing path to ready endpoints."
-        explanation = "The verified Service selector, matching Pods, and Endpoints evidence show that the Service has no ready endpoint path."
-        incident_type = "service_routing_failure"
-    elif signal == "pvc_binding_failure":
-        root = f"{resource} is not Bound, so the requested persistent storage is unavailable."
-        explanation = "The PVC status and its resource-scoped Warning events show a binding problem."
-        incident_type = "pvc_binding_failure"
-    elif signal == "deployment_rollout_failure":
-        root = f"{resource} has fewer ready or available replicas than desired."
-        explanation = "The verified Deployment spec/status shows the rollout has not reached its desired replica state."
-        incident_type = "deployment_rollout_failure"
-    else:
-        root = f"{resource} is unhealthy according to verified Kubernetes status/events."
-        explanation = "The workload has a verified unhealthy Pod signal, but the available evidence does not establish a more specific cause."
-        incident_type = "pod_unhealthy"
-
-    confidence = 0.92 if signal != "deployment_rollout_failure" else 0.90
-    return {
-        "incident_type": incident_type,
-        "root_cause": root,
-        "explanation": explanation,
-        "confidence": confidence,
-        "affected_resources": [resource],
-        "evidence_ids": [str(item.get("id"))],
-        "deterministic": True,
+def synthesize_incidents(incidents: list[dict[str, Any]], incident: str | None = None) -> dict[str, Any]:
+    if not incidents:
+        return {"status": "NO_ISSUE", "summary": "No operational anomalies were verified.", "findings": []}
+    payload = {
+        "incident": incident or "Cluster investigation",
+        "VERIFIED_INCIDENTS": incidents,
     }
+    return _call_model(payload)
 
 
-def _covered_by_existing(item: dict[str, Any], findings: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> bool:
-    signal = str(item.get("signal"))
-    resource = str(item.get("resource") or "")
-    related = {str(x) for x in item.get("related_resources") or []}
-    for finding in findings:
-        finding_resources = {str(x) for x in finding.get("affected_resources") or []}
-        finding_evidence = {str(x) for x in finding.get("evidence_ids") or []}
-        if str(item.get("id")) in finding_evidence:
-            return True
-        if resource in finding_resources or related & finding_resources:
-            if signal == "deployment_rollout_failure":
-                return any(str(by_id[eid].get("signal")) in {"image_pull_failure", "probe_failure", "scheduling_failure"} for eid in finding_evidence if eid in by_id)
-            if signal in PRIMARY_SIGNALS:
-                return True
-    return False
-
-
-def ensure_complete_findings(result: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
-    by_id = {str(item.get("id")): item for item in evidence}
-    findings = list(result.get("findings") or [])
-    for item in evidence:
-        if str(item.get("signal")) not in PRIMARY_SIGNALS:
-            continue
-        if not _covered_by_existing(item, findings, by_id):
-            findings.append(_deterministic_finding(item, {str(e.get("resource")) for e in evidence if e.get("resource")}))
-    result["findings"] = findings
-    result["status"] = "DIAGNOSED" if findings else ("NO_ISSUE" if not evidence else "NEED_MORE_EVIDENCE")
-    return result
+def synthesize(evidence: list[dict[str, Any]], incident: str | None = None) -> dict[str, Any]:
+    """Backward-compatible raw-evidence synthesis; new LangGraph flow uses synthesize_incidents."""
+    if not evidence:
+        return {"status": "NO_ISSUE", "summary": "No operational anomalies were verified.", "findings": []}
+    payload = {"incident": incident or "Cluster investigation", "VERIFIED_EVIDENCE": evidence}
+    return _call_model(payload)
 
 
 def validate_diagnosis(result: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reject model claims that cannot be traced to the verified evidence graph."""
     by_id = {str(item.get("id")): item for item in evidence}
     valid_resources = {str(item.get("resource")) for item in evidence if item.get("resource")}
     findings = []
     for finding in result.get("findings") or []:
-        if not isinstance(finding, dict) or not _finding_is_grounded(finding, by_id, valid_resources):
+        if not isinstance(finding, dict):
             continue
-        finding["evidence_ids"] = [str(x) for x in finding.get("evidence_ids") or [] if str(x) in by_id]
-        finding["affected_resources"] = [str(x) for x in finding.get("affected_resources") or [] if str(x) in valid_resources]
+        evidence_ids = [str(x) for x in finding.get("evidence_ids") or [] if str(x) in by_id]
+        resources = [str(x) for x in finding.get("affected_resources") or [] if str(x) in valid_resources]
+        if not evidence_ids or not resources:
+            continue
+        # Every referenced evidence item must belong to the same resource set or be explicitly related.
+        if not any(item.get("resource") in resources or set(item.get("related_resources") or []) & set(resources) for item in (by_id[eid] for eid in evidence_ids)):
+            continue
+        finding["evidence_ids"] = evidence_ids
+        finding["affected_resources"] = resources
         try:
             finding["confidence"] = max(0.0, min(1.0, float(finding.get("confidence", 0))))
         except (TypeError, ValueError):
@@ -217,4 +120,27 @@ def validate_diagnosis(result: dict[str, Any], evidence: list[dict[str, Any]]) -
         result.setdefault("summary", "No evidence-grounded diagnosis was established.")
         return result
     result["status"] = "DIAGNOSED"
+    return result
+
+
+def ensure_complete_findings_from_incidents(result: dict[str, Any], incidents: list[dict[str, Any]]) -> dict[str, Any]:
+    """Guarantee one validated finding per deterministic incident."""
+    existing = {str(f.get("incident_id")) for f in result.get("findings") or []}
+    findings = list(result.get("findings") or [])
+    for incident in incidents:
+        incident_id = str(incident.get("incident_id"))
+        if incident_id in existing:
+            continue
+        findings.append({
+            "incident_id": incident_id,
+            "incident_type": incident.get("type", "unknown"),
+            "root_cause": f"{incident.get('root_resource')} has a verified {incident.get('type')} incident.",
+            "explanation": "The incident was established by deterministic Kubernetes evidence; the model did not return a complete finding for it.",
+            "confidence": 0.90,
+            "affected_resources": [incident.get("root_resource")] + list(incident.get("resources") or []),
+            "evidence_ids": list(incident.get("evidence_ids") or []),
+            "deterministic": True,
+        })
+    result["findings"] = findings
+    result["status"] = "DIAGNOSED" if findings else "NO_ISSUE"
     return result
