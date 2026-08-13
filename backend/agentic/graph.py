@@ -6,10 +6,11 @@ from langgraph.graph import END, START, StateGraph
 from langsmith import traceable
 
 from backend.agentic.state import InvestigationState
-from backend.ai.diagnosis_synthesizer import ensure_complete_findings, synthesize, validate_diagnosis
+from backend.ai.diagnosis_synthesizer import ensure_complete_findings_from_incidents, synthesize_incidents, validate_diagnosis
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
 from backend.evidence.security.scoring import score_security_posture
+from backend.kubernetes.incident_correlator import correlate_incidents
 from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
 from backend.kubernetes.toolkit import K8sToolkit
 
@@ -18,9 +19,9 @@ DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational i
 
 
 @traceable(name="k8s.diagnosis.synthesis", run_type="llm")
-def _synthesize_with_trace(evidence: list[dict[str, Any]], incident: str) -> dict[str, Any]:
+def _synthesize_with_trace(incidents: list[dict[str, Any]], incident: str) -> dict[str, Any]:
     """Trace model synthesis as a nested LangSmith run."""
-    return synthesize(evidence, incident)
+    return synthesize_incidents(incidents, incident)
 
 
 def collect_operational_node(state: InvestigationState) -> dict[str, Any]:
@@ -30,8 +31,14 @@ def collect_operational_node(state: InvestigationState) -> dict[str, Any]:
     return {"operational_evidence": evidence, "expansion_passes": 0}
 
 
+def normalize_and_correlate_node(state: InvestigationState) -> dict[str, Any]:
+    evidence = evidence_as_json(state.get("operational_evidence") or [])
+    incidents = correlate_incidents(evidence)
+    logger.info("LangGraph correlated {} raw evidence items into {} independent incidents", len(evidence), len(incidents))
+    return {"normalized_evidence": evidence, "correlated_incidents": incidents}
+
+
 def collect_security_node(state: InvestigationState) -> dict[str, Any]:
-    # Security collection remains separate from operational root-cause reasoning.
     toolkit = K8sToolkit(context=state.get("context"))
     collection = SecurityEvidenceCollector(toolkit).collect()
     security_evidence = collection.get("evidence") or []
@@ -43,28 +50,30 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
 
 
 def diagnose_node(state: InvestigationState) -> dict[str, Any]:
-    verified = evidence_as_json(state.get("operational_evidence") or [])
+    evidence = evidence_as_json(state.get("operational_evidence") or [])
+    incidents = state.get("correlated_incidents") or []
     incident = state.get("incident_description") or DEFAULT_INCIDENT
 
-    # The LLM receives verified operational evidence only. It does not call Kubernetes.
-    synthesis = _synthesize_with_trace(verified, incident)
-    synthesis = validate_diagnosis(synthesis, verified)
-    # Deterministic completion prevents the model from hiding independently verified incidents.
-    synthesis = ensure_complete_findings(synthesis, verified)
+    # The LLM receives correlated incidents, not raw Kubernetes observations.
+    synthesis = _synthesize_with_trace(incidents, incident)
+    synthesis = validate_diagnosis(synthesis, evidence)
+    # Deterministic completeness guarantees that a verified incident cannot disappear
+    # merely because the model omitted it from its response.
+    synthesis = ensure_complete_findings_from_incidents(synthesis, incidents)
     return {"synthesis": synthesis}
 
 
 def expand_evidence_node(state: InvestigationState) -> dict[str, Any]:
-    """Run one controlled second evidence pass; still read-only Kubernetes API calls."""
     toolkit = K8sToolkit(context=state.get("context"))
     expanded = collect_operational_evidence(toolkit, limit=250)
-
     by_id = {str(item.get("id")): item for item in (state.get("operational_evidence") or [])}
     for item in expanded:
         by_id[str(item.get("id"))] = item
-
+    evidence = list(by_id.values())
     return {
-        "operational_evidence": list(by_id.values()),
+        "operational_evidence": evidence,
+        "normalized_evidence": evidence,
+        "correlated_incidents": correlate_incidents(evidence),
         "expansion_passes": int(state.get("expansion_passes", 0)) + 1,
     }
 
@@ -114,11 +123,7 @@ def diagnosis_from_synthesis(result: dict[str, Any], evidence: list[dict[str, An
         "kubectl_command": "",
         "prevention": "",
         "confidence": max(float(f.get("confidence", 0.0) or 0.0) for f in findings),
-        "affected_resources": [
-            resource
-            for finding in findings
-            for resource in (finding.get("affected_resources") or [])
-        ],
+        "affected_resources": [resource for finding in findings for resource in (finding.get("affected_resources") or [])],
         "findings": findings,
         "evidence": selected_evidence,
     }
@@ -127,12 +132,14 @@ def diagnosis_from_synthesis(result: dict[str, Any], evidence: list[dict[str, An
 def build_graph():
     builder = StateGraph(InvestigationState)
     builder.add_node("collect_operational", collect_operational_node)
+    builder.add_node("normalize_and_correlate", normalize_and_correlate_node)
     builder.add_node("collect_security", collect_security_node)
     builder.add_node("diagnose", diagnose_node)
     builder.add_node("expand_evidence", expand_evidence_node)
 
     builder.add_edge(START, "collect_operational")
-    builder.add_edge("collect_operational", "collect_security")
+    builder.add_edge("collect_operational", "normalize_and_correlate")
+    builder.add_edge("normalize_and_correlate", "collect_security")
     builder.add_edge("collect_security", "diagnose")
     builder.add_conditional_edges(
         "diagnose",
@@ -142,7 +149,7 @@ def build_graph():
             "finish": END,
         },
     )
-    builder.add_edge("expand_evidence", "diagnose")
+    builder.add_edge("expand_evidence", "normalize_and_correlate")
     return builder.compile()
 
 
