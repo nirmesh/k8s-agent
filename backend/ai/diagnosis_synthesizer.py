@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from backend.ai.llm_client import chat
+from backend.core.logging import logger
 
 SYSTEM_PROMPT = """You are the diagnosis synthesis layer of a Kubernetes SRE agent.
 
@@ -40,10 +42,25 @@ Return ONLY JSON:
 """
 
 
+def _debug_prompt_logging_enabled() -> bool:
+    return os.getenv("DEBUG_LLM_PROMPT", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _log_llm_input(payload: dict[str, Any]) -> None:
+    if not _debug_prompt_logging_enabled():
+        return
+    prompt = json.dumps(payload, default=str, indent=2)
+    logger.warning("=== LLM INPUT BEGIN ===")
+    logger.warning("SYSTEM_PROMPT:\n{}", SYSTEM_PROMPT)
+    logger.warning("USER_PAYLOAD:\n{}", prompt)
+    logger.warning("=== LLM INPUT END ===")
+
+
 def synthesize(evidence: list[dict[str, Any]], incident: str | None = None) -> dict[str, Any]:
     if not evidence:
         return {"status": "NO_ISSUE", "summary": "No operational anomalies were verified.", "findings": []}
     payload = {"incident": incident or "Cluster investigation", "VERIFIED_EVIDENCE": evidence}
+    _log_llm_input(payload)
     message = chat(
         [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": json.dumps(payload, default=str)}],
         tools=None,
@@ -109,7 +126,6 @@ def _workload_resource(item: dict[str, Any], valid_resources: set[str]) -> str:
 def _deterministic_finding(item: dict[str, Any], valid_resources: set[str]) -> dict[str, Any]:
     signal = str(item.get("signal"))
     resource = _workload_resource(item, valid_resources)
-    payload = item.get("payload") or {}
     if signal == "image_pull_failure":
         root = f"{resource} has a container image pull failure; the verified Pod evidence shows the image could not be pulled."
         explanation = "The Kubernetes Pod/container status or scoped Warning events contain image-pull-specific failure evidence."
@@ -161,8 +177,6 @@ def _covered_by_existing(item: dict[str, Any], findings: list[dict[str, Any]], b
         if str(item.get("id")) in finding_evidence:
             return True
         if resource in finding_resources or related & finding_resources:
-            # Rollout evidence is a consequence when the same workload already has
-            # a more specific image/probe/scheduling incident.
             if signal == "deployment_rollout_failure":
                 return any(str(by_id[eid].get("signal")) in {"image_pull_failure", "probe_failure", "scheduling_failure"} for eid in finding_evidence if eid in by_id)
             if signal in PRIMARY_SIGNALS:
@@ -171,7 +185,6 @@ def _covered_by_existing(item: dict[str, Any], findings: list[dict[str, Any]], b
 
 
 def ensure_complete_findings(result: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
-    """Preserve every independent verified incident even when the LLM omits one."""
     by_id = {str(item.get("id")): item for item in evidence}
     findings = list(result.get("findings") or [])
     for item in evidence:
@@ -185,7 +198,6 @@ def ensure_complete_findings(result: dict[str, Any], evidence: list[dict[str, An
 
 
 def validate_diagnosis(result: dict[str, Any], evidence: list[dict[str, Any]]) -> dict[str, Any]:
-    """Reject model claims that cannot be traced to the verified evidence graph."""
     by_id = {str(item.get("id")): item for item in evidence}
     valid_resources = {str(item.get("resource")) for item in evidence if item.get("resource")}
     findings = []
