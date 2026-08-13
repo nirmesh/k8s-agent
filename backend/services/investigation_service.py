@@ -13,11 +13,13 @@ def run_investigation(
 ) -> dict:
     """Run the read-only evidence-first investigation through LangGraph."""
     logger.info("Starting LangGraph evidence-driven SRE investigation")
-
     if progress_callback:
         progress_callback("Checking Pods")
 
-    state = graph.invoke({"context": context, "incident_description": incident_description or DEFAULT_INCIDENT})
+    state = graph.invoke(
+        {"context": context, "incident_description": incident_description or DEFAULT_INCIDENT},
+        config={"run_name": "sre_investigation"},
+    )
 
     evidence = state.get("operational_evidence") or []
     incidents = state.get("correlated_incidents") or []
@@ -34,7 +36,6 @@ def run_investigation(
         progress_callback("AI Reasoning")
 
     diagnosis = diagnosis_from_synthesis(synthesis, evidence)
-
     if progress_callback:
         progress_callback("Root Cause Found")
 
