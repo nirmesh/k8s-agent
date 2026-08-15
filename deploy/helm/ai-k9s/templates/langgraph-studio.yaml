@@ -38,6 +38,38 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "ai-k9s.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      initContainers:
+        - name: build-kubeconfig
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              cat > /work/kubeconfig <<EOF
+              apiVersion: v1
+              kind: Config
+              clusters:
+                - name: in-cluster
+                  cluster:
+                    certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                    server: https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT_HTTPS
+              contexts:
+                - name: in-cluster
+                  context:
+                    cluster: in-cluster
+                    namespace: {{ .Release.Namespace }}
+                    user: ai-k9s
+              current-context: in-cluster
+              users:
+                - name: ai-k9s
+                  user:
+                    tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+              EOF
+              chmod 600 /work/kubeconfig
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /work
       containers:
         - name: langgraph
           image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
@@ -47,6 +79,10 @@ spec:
             - name: http
               containerPort: 2024
           env:
+            - name: KUBECONFIG
+              value: /work/kubeconfig
+            - name: KUBECONFIG_PATH
+              value: /work/kubeconfig
             - name: LANGSMITH_TRACING
               value: {{ .Values.backend.env.langsmithTracing | quote }}
             - name: LANGSMITH_API_KEY
@@ -64,4 +100,7 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 10
+      volumes:
+        - name: kubeconfig
+          emptyDir: {}
 {{- end }}
