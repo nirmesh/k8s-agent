@@ -1,0 +1,67 @@
+{{- if and .Values.features.backend.enabled .Values.features.langgraphStudio.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ai-k9s.fullname" . }}-langgraph
+  labels:
+    {{- include "ai-k9s.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langgraph
+spec:
+  selector:
+    app.kubernetes.io/component: langgraph
+    {{- include "ai-k9s.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 2024
+      targetPort: 2024
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ai-k9s.fullname" . }}-langgraph
+  labels:
+    {{- include "ai-k9s.labels" . | nindent 4 }}
+    app.kubernetes.io/component: langgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: langgraph
+      {{- include "ai-k9s.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: langgraph
+        {{- include "ai-k9s.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{ toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "ai-k9s.serviceAccountName" . }}
+      containers:
+        - name: langgraph
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          command: ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--config", "/app/langgraph.json"]
+          ports:
+            - name: http
+              containerPort: 2024
+          env:
+            - name: LANGSMITH_TRACING
+              value: {{ .Values.backend.env.langsmithTracing | quote }}
+            - name: LANGSMITH_API_KEY
+              value: {{ .Values.backend.env.langsmithApiKey | quote }}
+            - name: LANGSMITH_PROJECT
+              value: {{ .Values.backend.env.langsmithProject | quote }}
+            - name: LANGSMITH_ENDPOINT
+              value: {{ .Values.backend.env.langsmithEndpoint | quote }}
+            - name: OLLAMA_HOST
+              value: {{ required "backend.env.ollamaHost is required" .Values.backend.env.ollamaHost | quote }}
+            - name: OLLAMA_MODEL
+              value: {{ .Values.backend.env.ollamaModel | quote }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+{{- end }}
