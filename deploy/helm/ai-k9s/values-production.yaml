@@ -1,0 +1,43 @@
+# Example production profile.
+# Replace placeholders before installation and provide secrets through your secret manager.
+features:
+  backend:
+    enabled: true
+  frontend:
+    enabled: true
+  mongodb:
+    enabled: false
+  langgraphStudio:
+    enabled: false
+
+rbac:
+  create: true
+  remediation:
+    enabled: false
+  secrets:
+    enabled: false
+
+backend:
+  image:
+    repository: REGISTRY/ai-k9s-backend
+    tag: "VERSION"
+  env:
+    ollamaHost: "http://OLLAMA_HOST:11434"
+    ollamaModel: "gpt-oss:120b"
+    mongodbUrl: "mongodb://USER:PASSWORD@MONGO_HOST:27017/ai_kubernetes_agent"
+    langsmithTracing: "false"
+    langsmithApiKey: ""
+
+frontend:
+  image:
+    repository: REGISTRY/ai-k9s-frontend
+    tag: "VERSION"
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: ai-k9s.example.com
+      paths:
+        - path: /
+          pathType: Prefix
