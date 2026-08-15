@@ -87,7 +87,7 @@ spec:
             - name: MONGODB_DATABASE
               value: "ai_kubernetes_agent"
             - name: OLLAMA_HOST
-              value: {{ .Values.backend.env.ollamaHost | quote }}
+              value: {{ required "backend.env.ollamaHost is required" .Values.backend.env.ollamaHost | quote }}
             - name: OLLAMA_MODEL
               value: {{ .Values.backend.env.ollamaModel | quote }}
             - name: OLLAMA_JSON_FORMAT
