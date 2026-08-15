@@ -1,0 +1,11 @@
+apiVersion: v2
+name: ai-k9s
+description: AI-K9s Kubernetes investigation agent with least-privilege read-only RBAC by default
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kubernetes
+  - sre
+  - ai
+  - langgraph
