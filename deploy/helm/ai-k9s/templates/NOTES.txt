@@ -1,0 +1,25 @@
+AI-K9s has been installed.
+
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Backend:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=backend
+
+Frontend:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/component=frontend
+
+ServiceAccount:
+  {{ include "ai-k9s.serviceAccountName" . }}
+
+Default RBAC posture:
+  read-only investigation = enabled
+  secret access = disabled
+  remediation writes = {{ ternary "enabled" "disabled" .Values.rbac.remediation.enabled }}
+
+If ingress is disabled, access the frontend with:
+  kubectl port-forward svc/{{ include "ai-k9s.fullname" . }}-frontend 3000:3000 -n {{ .Release.Namespace }}
+
+Before production use, review:
+  helm get manifest {{ .Release.Name }} -n {{ .Release.Namespace }}
+  kubectl auth can-i --list --as=system:serviceaccount:{{ .Release.Namespace }}:{{ include "ai-k9s.serviceAccountName" . }}
