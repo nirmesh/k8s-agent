@@ -1,0 +1,92 @@
+nameOverride: ""
+fullnameOverride: ""
+
+commonLabels: {}
+podLabels: {}
+
+features:
+  backend:
+    enabled: true
+  frontend:
+    enabled: true
+  mongodb:
+    enabled: true
+  langgraphStudio:
+    enabled: false
+
+rbac:
+  create: true
+  remediation:
+    enabled: false
+  secrets:
+    enabled: false
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+global:
+  imagePullSecrets: []
+
+backend:
+  replicaCount: 1
+  image:
+    repository: ai-k9s-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 8000
+  resources: {}
+  env:
+    ollamaHost: "http://host.docker.internal:11434"
+    ollamaModel: "gpt-oss:120b"
+    ollamaJsonFormat: "false"
+    langsmithTracing: "false"
+    langsmithApiKey: ""
+    langsmithProject: "ai-k9s"
+    langsmithEndpoint: "https://api.smith.langchain.com"
+    debugLlmPrompt: "false"
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: ai-k9s-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    type: ClusterIP
+    port: 3000
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: ai-k9s.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+mongodb:
+  image:
+    repository: mongo
+    tag: "7"
+    pullPolicy: IfNotPresent
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+  resources: {}
+
+networkPolicy:
+  enabled: false
