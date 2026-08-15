@@ -71,9 +71,6 @@ spec:
                     tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
               EOF
               chmod 600 /work/kubeconfig
-          env:
-            - name: KUBERNETES_SERVICE_HOST
-              value: {{ required "KUBERNETES_SERVICE_HOST is provided by Kubernetes" "placeholder" | quote }}
           volumeMounts:
             - name: kubeconfig
               mountPath: /work
