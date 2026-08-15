@@ -88,6 +88,3 @@ mongodb:
     size: 10Gi
     storageClass: ""
   resources: {}
-
-networkPolicy:
-  enabled: false
