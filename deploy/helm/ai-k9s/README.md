@@ -63,17 +63,25 @@ In a production environment, provide credentials through your organization's sec
 
 ## Verify RBAC
 
+Get the actual ServiceAccount name created by the release:
+
 ```bash
-kubectl auth can-i --as=system:serviceaccount:ai-k9s:ai-k9s-get clusterrolebindings
-kubectl auth can-i --as=system:serviceaccount:ai-k9s:ai-k9s-get get pods --all-namespaces
-kubectl auth can-i --as=system:serviceaccount:ai-k9s:ai-k9s-get patch deployments --all-namespaces
+SA=$(kubectl get sa -n ai-k9s -l app.kubernetes.io/instance=ai-k9s -o jsonpath='{.items[0].metadata.name}')
 ```
 
-The expected posture for the default installation is:
+Then test the important boundaries:
 
-- read/list/watch: allowed for investigation resources
-- patch/update: denied
-- secrets: denied
+```bash
+kubectl auth can-i get pods --all-namespaces --as=system:serviceaccount:ai-k9s:$SA
+kubectl auth can-i patch deployments --all-namespaces --as=system:serviceaccount:ai-k9s:$SA
+kubectl auth can-i get secrets --all-namespaces --as=system:serviceaccount:ai-k9s:$SA
+```
+
+The expected default result is:
+
+- pod read: yes
+- deployment patch: no
+- secret read: no
 
 ## Read-only versus remediation
 
@@ -83,7 +91,7 @@ Do not enable remediation for the current read-only investigation release unless
 --set rbac.remediation.enabled=true
 ```
 
-When enabled, the chart adds a narrow set of patch/update permissions for selected workload and networking resources. Review the resulting rendered RBAC before applying it in a production cluster.
+When enabled, the chart adds a narrow set of patch/update permissions for selected workload and networking resources. Review the resulting RBAC before applying it in a production cluster.
 
 ## Kubernetes authentication
 
