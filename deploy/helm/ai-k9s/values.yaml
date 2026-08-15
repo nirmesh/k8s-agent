@@ -40,9 +40,10 @@ backend:
     port: 8000
   resources: {}
   env:
-    ollamaHost: "http://host.docker.internal:11434"
+    ollamaHost: ""
     ollamaModel: "gpt-oss:120b"
     ollamaJsonFormat: "false"
+    mongodbUrl: ""
     langsmithTracing: "false"
     langsmithApiKey: ""
     langsmithProject: "ai-k9s"
