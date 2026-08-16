@@ -50,6 +50,8 @@ spec:
           command: ["/bin/sh", "-ec"]
           args:
             - |
+              : "${KUBERNETES_SERVICE_HOST:?KUBERNETES_SERVICE_HOST is not set}"
+              : "${KUBERNETES_SERVICE_PORT_HTTPS:?KUBERNETES_SERVICE_PORT_HTTPS is not set}"
               cat > /work/kubeconfig <<EOF
               apiVersion: v1
               kind: Config
@@ -57,7 +59,7 @@ spec:
                 - name: in-cluster
                   cluster:
                     certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-                    server: https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT_HTTPS
+                    server: https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT_HTTPS}
               contexts:
                 - name: in-cluster
                   context:
@@ -87,7 +89,7 @@ spec:
             - name: MONGODB_DATABASE
               value: "ai_kubernetes_agent"
             - name: OLLAMA_HOST
-              value: {{ required "backend.env.ollamaHost is required" .Values.backend.env.ollamaHost | quote }}
+              value: {{ .Values.backend.env.ollamaHost | quote }}
             - name: OLLAMA_MODEL
               value: {{ .Values.backend.env.ollamaModel | quote }}
             - name: OLLAMA_JSON_FORMAT
