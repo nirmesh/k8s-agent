@@ -83,6 +83,10 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /work
+              readOnly: true
           env:
             - name: MONGODB_URL
               value: {{ if .Values.features.mongodb.enabled }}"mongodb://{{ include "ai-k9s.fullname" . }}-mongodb:27017"{{ else }}{{ required "backend.env.mongodbUrl is required when mongodb is disabled" .Values.backend.env.mongodbUrl | quote }}{{ end }}
@@ -127,14 +131,14 @@ spec:
           emptyDir: {}
       {{- with .Values.backend.nodeSelector }}
       nodeSelector:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.backend.nodeSelector | nindent 8 }}
       {{- end }}
       {{- with .Values.backend.tolerations }}
       tolerations:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.backend.tolerations | nindent 8 }}
       {{- end }}
       {{- with .Values.backend.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.backend.affinity | nindent 8 }}
       {{- end }}
 {{- end }}
