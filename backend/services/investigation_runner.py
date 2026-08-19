@@ -6,6 +6,7 @@ from backend.core.database import get_db
 from backend.core.logging import logger
 from backend.kubernetes.executor import set_context
 from backend.services.investigation_service import run_investigation
+from backend.services.security_evidence_store import persist_security_evidence
 
 
 def create_investigation(user_id: str) -> str:
@@ -54,6 +55,9 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
             if len(parts) == 3:
                 namespace = parts[1]
 
+        security_evidence = result.get("security_evidence") or []
+        security_evidence_count = persist_security_evidence(db, investigation_id, security_evidence)
+
         db.investigations.update_one(
             {"_id": ObjectId(investigation_id)},
             {"$set": {
@@ -65,7 +69,7 @@ def run_and_save(investigation_id: str, context: str | None = None) -> None:
                 "network": result.get("network", {}),
                 "operational_evidence": result.get("operational_evidence", []),
                 "correlated_incidents": result.get("correlated_incidents", []),
-                "security_evidence": result.get("security_evidence", []),
+                "security_evidence_count": security_evidence_count,
                 "security_summary": result.get("security_summary", {}),
                 "diagnosis": diagnosis,
                 "remediation_plan": None,
