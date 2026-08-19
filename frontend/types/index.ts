@@ -28,12 +28,27 @@ export interface SecurityWorkload {
   findings: { title: string; severity: string; category: string; cve_id?: string; recommendation?: string }[];
   internet_facing?: boolean; privileged?: boolean; host_network?: boolean; replicas?: number; running?: number; recommendation: string;
 }
+export interface NativePostureFinding {
+  title?: string | null;
+  severity: string;
+  category?: string | null;
+  resource: string;
+  namespace?: string | null;
+  source?: string | null;
+  layer?: string | null;
+  domain?: string | null;
+  description?: string | null;
+  recommendation?: string | null;
+  impact?: string | null;
+  rule_id?: string | null;
+}
 export interface SecuritySummary {
   status: "AVAILABLE" | "UNAVAILABLE"; reason?: string | null; cluster_security_score: number | null; score_basis?: string;
   scored_vulnerabilities?: number; unscored_unknown_vulnerabilities?: number; total_vulnerabilities: number;
   critical_vulnerabilities: number; high_vulnerabilities: number; medium_vulnerabilities: number; low_vulnerabilities: number; unknown_vulnerabilities: number;
   total_misconfigurations: number; total_exposed_secrets: number; workload_count?: number; affected_workloads?: number; affected_namespaces?: number;
   critical_workloads?: SecurityWorkload[]; high_risk_namespaces?: { namespace: string; average_score: number }[]; top_10_risks: SecurityWorkload[]; top_recommendations: string[];
+  native_posture_findings?: NativePostureFinding[];
 }
 export interface Investigation {
   id: string; status: string; steps: { name: string; completed: boolean; timestamp: string }[]; diagnosis: Diagnosis | null; remediation_plan: RemediationPlan | null;
