@@ -53,8 +53,8 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
     # like Trivy findings. This keeps scanner/provider names out of the product
     # contract while preserving source/layer/domain in normalized evidence.
     collection_summary = collection.get("summary") or {}
-    nodes_result = toolkit.get_resources("nodes", None)
-    posture_api_available = bool(nodes_result.get("success"))
+    node_result = toolkit.get_resources("node", None)
+    posture_api_available = bool(node_result.get("success"))
     available = collection_summary.get("status") == "AVAILABLE" or posture_api_available
     errors = collection_summary.get("reason")
     summary_errors = [errors] if errors else []
