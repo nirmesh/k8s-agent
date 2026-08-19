@@ -33,61 +33,54 @@ class SecurityDomain(str, Enum):
     SECRETS = "secrets"
 
 
-# Registry is product metadata, not execution logic. New scanners/providers can be
-# plugged in here without forcing the UI or investigation engine to know their names.
+# Product metadata: scanners are implementation details; layers/domains are the
+# stable contract consumed by the investigation engine and UI.
 SECURITY_PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
-    "trivy": {
-        "layer": SecurityLayer.POSTURE,
-        "domains": [SecurityDomain.WORKLOAD, SecurityDomain.SUPPLY_CHAIN, SecurityDomain.SECRETS],
-    },
-    "kube-bench": {
-        "layer": SecurityLayer.COMPLIANCE,
-        "domains": [SecurityDomain.CLUSTER, SecurityDomain.CONTROL_PLANE, SecurityDomain.IDENTITY],
-    },
-    "kube-hunter": {
-        "layer": SecurityLayer.ATTACK_SURFACE,
-        "domains": [SecurityDomain.CLUSTER, SecurityDomain.NETWORK, SecurityDomain.IDENTITY],
-    },
-    "syft": {
-        "layer": SecurityLayer.SUPPLY_CHAIN,
-        "domains": [SecurityDomain.SUPPLY_CHAIN, SecurityDomain.WORKLOAD],
-    },
-    "grype": {
-        "layer": SecurityLayer.SUPPLY_CHAIN,
-        "domains": [SecurityDomain.SUPPLY_CHAIN, SecurityDomain.WORKLOAD],
-    },
-    "falco": {
-        "layer": SecurityLayer.RUNTIME,
-        "domains": [SecurityDomain.RUNTIME, SecurityDomain.WORKLOAD, SecurityDomain.NETWORK],
-    },
-    "sonobuoy": {
-        "layer": SecurityLayer.COMPLIANCE,
-        "domains": [SecurityDomain.COMPLIANCE, SecurityDomain.CLUSTER],
-    },
-    "kubernetes-native": {
-        "layer": SecurityLayer.POSTURE,
-        "domains": [
-            SecurityDomain.CLUSTER,
-            SecurityDomain.CONTROL_PLANE,
-            SecurityDomain.IDENTITY,
-            SecurityDomain.NETWORK,
-            SecurityDomain.SECRETS,
-        ],
-    },
+    "trivy": {"layer": SecurityLayer.POSTURE, "domains": [SecurityDomain.WORKLOAD, SecurityDomain.SUPPLY_CHAIN, SecurityDomain.SECRETS]},
+    "kube-bench": {"layer": SecurityLayer.COMPLIANCE, "domains": [SecurityDomain.CLUSTER, SecurityDomain.CONTROL_PLANE, SecurityDomain.IDENTITY]},
+    "kube-hunter": {"layer": SecurityLayer.ATTACK_SURFACE, "domains": [SecurityDomain.CLUSTER, SecurityDomain.NETWORK, SecurityDomain.IDENTITY]},
+    "syft": {"layer": SecurityLayer.SUPPLY_CHAIN, "domains": [SecurityDomain.SUPPLY_CHAIN, SecurityDomain.WORKLOAD]},
+    "grype": {"layer": SecurityLayer.SUPPLY_CHAIN, "domains": [SecurityDomain.SUPPLY_CHAIN, SecurityDomain.WORKLOAD]},
+    "falco": {"layer": SecurityLayer.RUNTIME, "domains": [SecurityDomain.RUNTIME, SecurityDomain.WORKLOAD, SecurityDomain.NETWORK]},
+    "sonobuoy": {"layer": SecurityLayer.COMPLIANCE, "domains": [SecurityDomain.COMPLIANCE, SecurityDomain.CLUSTER]},
+    "kubernetes-native": {"layer": SecurityLayer.POSTURE, "domains": [SecurityDomain.CLUSTER, SecurityDomain.CONTROL_PLANE, SecurityDomain.IDENTITY, SecurityDomain.NETWORK, SecurityDomain.SECRETS]},
 }
 
 
+def canonical_source(provider: str | None) -> str | None:
+    """Map provider implementation names to the stable product source name."""
+    if not provider:
+        return None
+    value = provider.lower()
+    if value.startswith("trivy"):
+        return "trivy"
+    if value.startswith("kube-bench"):
+        return "kube-bench"
+    if value.startswith("kube-hunter"):
+        return "kube-hunter"
+    if value.startswith("sonobuoy"):
+        return "sonobuoy"
+    if value.startswith("falco"):
+        return "falco"
+    if value.startswith("syft"):
+        return "syft"
+    if value.startswith("grype"):
+        return "grype"
+    if value.startswith("kubernetes"):
+        return "kubernetes-native"
+    return value
+
+
 def provider_metadata(source: str | None) -> dict[str, Any]:
-    """Return provider metadata without making callers depend on a scanner."""
-    return SECURITY_PROVIDER_REGISTRY.get(source or "", {})
+    return SECURITY_PROVIDER_REGISTRY.get(canonical_source(source) or "", {})
 
 
 def classify_finding(source: str | None, category: str) -> tuple[SecurityLayer, SecurityDomain]:
-    """Translate provider/category into the stable product vocabulary."""
+    """Translate provider/category into stable product vocabulary."""
+    source = canonical_source(source)
     meta = provider_metadata(source)
     layer = meta.get("layer", SecurityLayer.POSTURE)
     domains = meta.get("domains") or [SecurityDomain.WORKLOAD]
-
     if source == "trivy":
         domain_by_category = {
             "vulnerability": SecurityDomain.WORKLOAD,
@@ -96,16 +89,11 @@ def classify_finding(source: str | None, category: str) -> tuple[SecurityLayer, 
             "sbom": SecurityDomain.SUPPLY_CHAIN,
         }
         return layer, domain_by_category.get(category, domains[0])
-
     return layer, domains[0]
 
 
 class SecurityFinding(BaseModel):
-    """Normalized security finding produced by any security provider.
-
-    Provider/tool-specific output is translated into this common contract so the
-    investigation and UI reason about layers/domains rather than scanner names.
-    """
+    """Normalized security finding produced by any security provider."""
 
     category: str = Field(description="Finding category, e.g. vulnerability, threat, misconfiguration.")
     layer: SecurityLayer = Field(default=SecurityLayer.POSTURE, description="Security lifecycle layer.")
@@ -129,9 +117,8 @@ class SecurityFinding(BaseModel):
 
     @model_validator(mode="after")
     def derive_classification(self) -> "SecurityFinding":
-        # If an adapter provides a source, classification is authoritative.
-        # Otherwise preserve explicitly supplied layer/domain values.
         if self.source:
+            self.source = canonical_source(self.source)
             self.layer, self.domain = classify_finding(self.source, self.category)
         return self
 
@@ -145,7 +132,7 @@ class SecurityEvidence(Evidence):
     type: str = "security"
     layer: SecurityLayer = Field(default=SecurityLayer.POSTURE, description="Security lifecycle layer.")
     domain: SecurityDomain = Field(default=SecurityDomain.WORKLOAD, description="Security concern domain.")
-    source: str | None = Field(default=None, description="Provider/tool identifier for provenance.")
+    source: str | None = Field(default=None, description="Stable provider/tool identifier for provenance.")
     namespace: str | None = Field(default=None, description="Resource namespace.")
     category: str | None = Field(default=None, description="Finding category.")
     title: str | None = Field(default=None, description="Short finding title.")
@@ -153,19 +140,18 @@ class SecurityEvidence(Evidence):
     recommendation: str | None = Field(default=None, description="Actionable recommendation.")
     impact: str | None = Field(default=None, description="Why this finding matters to the environment.")
     references: list[str] | None = Field(default=None, description="Reference URLs.")
-    payload: SecurityFinding | dict[str, Any] = Field(
-        description="Normalized security finding payload or structured artifact (e.g. SBOM)."
-    )
+    payload: SecurityFinding | dict[str, Any] = Field(description="Normalized finding payload or structured artifact.")
 
     @model_validator(mode="after")
     def sync_from_payload(self) -> "SecurityEvidence":
+        source = canonical_source(self.source or self.provider)
+        self.source = source
         if isinstance(self.payload, SecurityFinding):
-            self.source = self.source or self.payload.source
-            self.layer = self.payload.layer
-            self.domain = self.payload.domain
+            self.source = self.payload.source or source
+            self.layer, self.domain = classify_finding(self.source, self.payload.category)
             self.category = self.category or self.payload.category
             self.impact = self.impact or self.payload.impact
-        elif self.source and self.category:
+        elif self.category:
             self.layer, self.domain = classify_finding(self.source, self.category)
         return self
 
