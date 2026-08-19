@@ -9,6 +9,8 @@ from backend.agentic.state import InvestigationState
 from backend.ai.diagnosis_synthesizer import ensure_complete_findings_from_incidents, synthesize_incidents, validate_diagnosis
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.posture import evaluate_cluster_posture
+from backend.evidence.security.collector import SecuritySummarizer
 from backend.evidence.security.scoring import score_security_posture
 from backend.kubernetes.incident_correlator import correlate_incidents
 from backend.kubernetes.investigation_engine import collect_operational_evidence, evidence_as_json
@@ -42,8 +44,52 @@ def normalize_and_correlate_node(state: InvestigationState) -> dict[str, Any]:
 def collect_security_node(state: InvestigationState) -> dict[str, Any]:
     toolkit = K8sToolkit(context=state.get("context"))
     collection = SecurityEvidenceCollector(toolkit).collect()
-    security_evidence = collection.get("evidence") or []
-    security_summary = score_security_posture(collection.get("summary") or {})
+    trivy_evidence = collection.get("evidence") or []
+    posture_evidence = evaluate_cluster_posture(toolkit)
+    security_evidence = trivy_evidence + posture_evidence
+
+    # Rebuild the deterministic summary from the combined evidence so native
+    # Kubernetes posture findings affect workload risk, counts, and score just
+    # like Trivy findings. This keeps scanner/provider names out of the product
+    # contract while preserving source/layer/domain in normalized evidence.
+    collection_summary = collection.get("summary") or {}
+    nodes_result = toolkit.get_resources("nodes", None)
+    posture_api_available = bool(nodes_result.get("success"))
+    available = collection_summary.get("status") == "AVAILABLE" or posture_api_available
+    errors = collection_summary.get("reason")
+    summary_errors = [errors] if errors else []
+
+    combined_summary = SecuritySummarizer(
+        toolkit,
+        security_evidence,
+        available=available,
+        errors=summary_errors,
+    ).summarize()
+    combined_summary["native_posture_findings"] = [
+        {
+            "title": e.title,
+            "severity": e.severity,
+            "category": e.category,
+            "resource": e.resource,
+            "namespace": e.namespace,
+            "source": e.source,
+            "layer": e.layer.value if hasattr(e.layer, "value") else str(e.layer),
+            "domain": e.domain.value if hasattr(e.domain, "value") else str(e.domain),
+            "description": e.description,
+            "recommendation": e.recommendation,
+            "impact": e.impact,
+            "rule_id": getattr(e.payload, "rule_id", None),
+        }
+        for e in posture_evidence
+    ]
+    security_summary = score_security_posture(combined_summary)
+
+    logger.info(
+        "Security collection: trivy=%s native_posture=%s total=%s",
+        len(trivy_evidence),
+        len(posture_evidence),
+        len(security_evidence),
+    )
     return {
         "security_evidence": [e.model_dump(mode="json") for e in security_evidence],
         "security_summary": security_summary,
