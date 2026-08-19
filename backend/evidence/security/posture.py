@@ -54,55 +54,60 @@ def evaluate_cluster_posture(toolkit: Any) -> list[SecurityEvidence]:
     """Run deterministic, read-only Kubernetes security checks.
 
     This intentionally uses the Kubernetes API instead of a scanner binary so
-    basic cluster/control-plane risks remain available even when optional
+    basic workload/control-plane risks remain available even when optional
     security tools are disabled.
     """
     findings: list[SecurityEvidence] = []
 
-    # API-server encryption-at-rest is best verified from the control-plane
-    # configuration when it is exposed. If unavailable, do not invent a result.
+    # First prove that the Kubernetes API is reachable. Do not manufacture
+    # posture findings when the cluster cannot be queried.
     try:
-        api = toolkit.get_resources("nodes", None)
+        api = toolkit.get_resources("node", None)
         if not api.get("success"):
             return findings
     except Exception:
         return findings
 
-    # These checks are implemented conservatively: only emit a finding when
-    # the API evidence clearly demonstrates the condition.
+    # Inspect ALL pods across ALL namespaces. The previous implementation used
+    # "pods" in kube-system, but K8sToolkit's canonical resource key is "pod".
+    # That meant the API lookup returned nothing and a privileged workload such
+    # as Pod/default/security-test-privileged was silently missed.
     try:
-        pods = toolkit.get_resources("pods", "kube-system")
+        pods = toolkit.get_resources("pod", None)
         if pods.get("success"):
             for pod in (pods.get("data") or {}).get("items") or []:
                 meta = pod.get("metadata") or {}
                 spec = pod.get("spec") or {}
                 name = meta.get("name", "unknown")
-                ns = meta.get("namespace", "kube-system")
+                ns = meta.get("namespace", "default")
                 resource = f"Pod/{ns}/{name}"
+
                 if spec.get("hostNetwork"):
                     findings.append(_finding(
                         rule_id="K8S-POSTURE-HOSTNETWORK",
-                        title="Control-plane pod uses hostNetwork",
+                        title="Pod uses hostNetwork",
                         description=f"{resource} shares the node network namespace.",
                         severity="HIGH",
                         resource=resource,
                         domain=SecurityDomain.NETWORK,
-                        recommendation="Avoid hostNetwork unless the component requires it; otherwise isolate it with normal pod networking.",
-                        impact="A compromise can gain direct access to node-network services and bypass normal pod-network isolation.",
+                        recommendation="Avoid hostNetwork unless the workload requires it; otherwise use normal pod networking.",
+                        impact="A compromised workload can gain direct access to node-network services and bypass normal pod-network isolation.",
                     ))
+
                 if spec.get("hostPID"):
                     findings.append(_finding(
                         rule_id="K8S-POSTURE-HOSTPID",
-                        title="Control-plane pod uses hostPID",
+                        title="Pod uses hostPID",
                         description=f"{resource} shares the node process namespace.",
                         severity="HIGH",
                         resource=resource,
                         domain=SecurityDomain.RUNTIME,
-                        recommendation="Remove hostPID unless explicitly required by the component.",
+                        recommendation="Remove hostPID unless explicitly required by the workload.",
                         impact="Process namespace sharing can expose host processes to a compromised workload.",
                     ))
+
                 for container in spec.get("containers") or []:
-                    security = (container.get("securityContext") or {})
+                    security = container.get("securityContext") or {}
                     if security.get("privileged") is True:
                         cname = container.get("name", "unknown")
                         findings.append(_finding(
