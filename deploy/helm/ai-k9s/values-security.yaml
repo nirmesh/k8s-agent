@@ -1,0 +1,31 @@
+# Optional security integrations. The built-in Kubernetes posture provider
+# requires no external scanner installation.
+security:
+  enabled: true
+  posture:
+    enabled: true
+  providers:
+    trivy:
+      enabled: true
+      install: false
+    kubescape:
+      enabled: false
+      install: false
+    kubeBench:
+      enabled: false
+      install: false
+    kubeHunter:
+      enabled: false
+      install: false
+    syft:
+      enabled: false
+      install: false
+    grype:
+      enabled: false
+      install: false
+    sonobuoy:
+      enabled: false
+      install: false
+    falco:
+      enabled: false
+      install: false
