@@ -1,10 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import type { SecuritySummary } from "@/types";
+import type { SecuritySummary as SecuritySummaryType } from "@/types";
 
-interface Props { summary: SecuritySummary | null | undefined; }
+interface Props { summary: SecuritySummaryType | null | undefined; }
 const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
+
+const severityClass = (severity: string) => {
+  switch (severity) {
+    case "CRITICAL": return "bg-rose-500/20 text-rose-300";
+    case "HIGH": return "bg-orange-500/20 text-orange-300";
+    case "MEDIUM": return "bg-amber-500/20 text-amber-300";
+    default: return "bg-emerald-500/20 text-emerald-300";
+  }
+};
 
 export default function SecuritySummary({ summary }: Props) {
   const [expandedSection, setExpandedSection] = useState(false);
@@ -26,6 +35,7 @@ export default function SecuritySummary({ summary }: Props) {
   const toggleWorkload = (idx: number) => setExpandedWorkloads((prev) => ({ ...prev, [idx]: !prev[idx] }));
   const top = summary.top_10_risks || [];
   const workloadCount = summary.affected_workloads ?? summary.workload_count ?? 0;
+  const nativePosture = summary.native_posture_findings || [];
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-700/30 bg-slate-900/60 shadow-lg backdrop-blur">
@@ -58,6 +68,8 @@ export default function SecuritySummary({ summary }: Props) {
           <span>·</span>
           <span>{summary.total_misconfigurations ?? 0} misconfigs</span>
           <span>·</span>
+          <span>{nativePosture.length} native posture findings</span>
+          <span>·</span>
           <span>{workloadCount} workloads</span>
           <span className="ml-auto text-slate-600">Expand for details</span>
         </div>
@@ -70,12 +82,12 @@ export default function SecuritySummary({ summary }: Props) {
           <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
             <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Vulnerabilities</p><p className="text-xl font-semibold text-slate-100">{summary.total_vulnerabilities ?? 0}</p></div>
             <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Misconfigs</p><p className="text-xl font-semibold text-slate-100">{summary.total_misconfigurations ?? 0}</p></div>
-            <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Exposed Secrets</p><p className="text-xl font-semibold text-slate-100">{summary.total_exposed_secrets ?? 0}</p></div>
+            <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Native Posture</p><p className="text-xl font-semibold text-slate-100">{nativePosture.length}</p></div>
             <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Workloads</p><p className="text-xl font-semibold text-slate-100">{workloadCount}</p></div>
           </div>
 
           <div className="mb-6 grid grid-cols-3 gap-4 md:grid-cols-6">
-            {[["Critical", summary.critical_vulnerabilities ?? 0, "text-rose-400"],["High", summary.high_vulnerabilities ?? 0, "text-orange-400"],["Medium", summary.medium_vulnerabilities ?? 0, "text-amber-400"],["Low", summary.low_vulnerabilities ?? 0, "text-emerald-400"],["Unknown", summary.unknown_vulnerabilities ?? 0, "text-slate-400"],["Namespaces", summary.affected_namespaces ?? 0, "text-slate-400"]].map(([label, value, color]) => (
+            {[['Critical', summary.critical_vulnerabilities ?? 0, 'text-rose-400'], ['High', summary.high_vulnerabilities ?? 0, 'text-orange-400'], ['Medium', summary.medium_vulnerabilities ?? 0, 'text-amber-400'], ['Low', summary.low_vulnerabilities ?? 0, 'text-emerald-400'], ['Unknown', summary.unknown_vulnerabilities ?? 0, 'text-slate-400'], ['Namespaces', summary.affected_namespaces ?? 0, 'text-slate-400']].map(([label, value, color]) => (
               <div key={String(label)} className="rounded-lg border border-slate-700/30 bg-slate-950/50 p-3 text-center">
                 <p className={`text-[10px] uppercase tracking-wider ${color}`}>{label}</p>
                 <p className="text-lg font-semibold text-slate-100">{value}</p>
@@ -85,6 +97,38 @@ export default function SecuritySummary({ summary }: Props) {
           </div>
 
           {summary.top_recommendations?.length > 0 && <div className="mb-6 rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-500">Top Recommendations</p><ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">{summary.top_recommendations.map((rec, i) => <li key={i}>{rec}</li>)}</ul></div>}
+
+          {nativePosture.length > 0 && (
+            <div className="mb-6 rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-cyan-300">Native Kubernetes Posture</p>
+                  <p className="mt-1 text-xs text-slate-500">Read-only checks against the live Kubernetes API</p>
+                </div>
+                <span className="rounded-full bg-cyan-500/10 px-2.5 py-1 text-xs font-semibold text-cyan-300">{nativePosture.length} finding{nativePosture.length === 1 ? "" : "s"}</span>
+              </div>
+              <div className="space-y-3">
+                {nativePosture.map((finding, i) => (
+                  <div key={`${finding.resource}-${finding.rule_id || finding.title || i}`} className="rounded-xl border border-slate-700/40 bg-slate-950/60 p-4">
+                    <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="mb-1 flex flex-wrap items-center gap-2">
+                          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${severityClass(finding.severity)}`}>{finding.severity}</span>
+                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{finding.layer || "posture"}</span>
+                          <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">{finding.domain || "workload"}</span>
+                        </div>
+                        <p className="font-medium text-slate-100">{finding.title || "Security posture finding"}</p>
+                        <p className="mt-1 break-all font-mono text-xs text-cyan-300">{finding.resource}</p>
+                      </div>
+                    </div>
+                    {finding.description && <p className="mt-3 text-sm leading-5 text-slate-400">{finding.description}</p>}
+                    {finding.impact && <p className="mt-2 text-xs leading-5 text-slate-500"><span className="font-semibold text-slate-400">Impact:</span> {finding.impact}</p>}
+                    {finding.recommendation && <p className="mt-2 text-xs leading-5 text-slate-500"><span className="font-semibold text-slate-400">Recommendation:</span> {finding.recommendation}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-500">Top Risky Workloads</h3>
           <div className="space-y-3">
@@ -101,7 +145,7 @@ export default function SecuritySummary({ summary }: Props) {
                       <span className="text-slate-400">{isOpen ? "▲" : "▼"}</span>
                     </div>
                   </button>
-                  {isOpen && <div className="mt-4 space-y-2 border-t border-slate-700/30 pt-3">{w.findings?.length ? <ul className="space-y-2">{w.findings.slice(0, 20).map((f, i) => <li key={i} className="text-sm text-slate-300"><span className={`mr-2 rounded px-1.5 py-0.5 text-xs font-semibold ${f.severity === "CRITICAL" ? "bg-rose-500/20 text-rose-300" : f.severity === "HIGH" ? "bg-orange-500/20 text-orange-300" : f.severity === "MEDIUM" ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300"}`}>{f.severity}</span>{f.category === "vulnerability" && f.cve_id ? <span className="mr-2 font-mono text-slate-400">{f.cve_id}</span> : null}{f.title}{f.recommendation ? <p className="mt-1 text-xs text-slate-500">{f.recommendation}</p> : null}</li>)}{w.findings.length > 20 && <li className="text-xs text-slate-500">... {w.findings.length - 20} more findings</li>}</ul> : <p className="text-sm text-slate-500">No individual findings available.</p>}</div>}
+                  {isOpen && <div className="mt-4 space-y-2 border-t border-slate-700/30 pt-3">{w.findings?.length ? <ul className="space-y-2">{w.findings.slice(0, 20).map((f, i) => <li key={i} className="text-sm text-slate-300"><span className={`mr-2 rounded px-1.5 py-0.5 text-xs font-semibold ${severityClass(f.severity)}`}>{f.severity}</span>{f.category === "vulnerability" && f.cve_id ? <span className="mr-2 font-mono text-slate-400">{f.cve_id}</span> : null}{f.title}{f.recommendation ? <p className="mt-1 text-xs text-slate-500">{f.recommendation}</p> : null}</li>)}{w.findings.length > 20 && <li className="text-xs text-slate-500">... {w.findings.length - 20} more findings</li>}</ul> : <p className="text-sm text-slate-500">No individual findings available.</p>}</div>}
                 </div>
               );
             })}
