@@ -10,6 +10,7 @@ from backend.ai.diagnosis_synthesizer import ensure_complete_findings_from_incid
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
 from backend.evidence.security.posture import evaluate_cluster_posture
+from backend.evidence.security.posture_checks import collect_native_posture_checks
 from backend.evidence.security.collector import SecuritySummarizer
 from backend.evidence.security.scoring import score_security_posture
 from backend.kubernetes.incident_correlator import correlate_incidents
@@ -46,6 +47,7 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
     collection = SecurityEvidenceCollector(toolkit).collect()
     trivy_evidence = collection.get("evidence") or []
     posture_evidence = evaluate_cluster_posture(toolkit)
+    native_posture_checks = collect_native_posture_checks(toolkit, posture_evidence)
     security_evidence = trivy_evidence + posture_evidence
 
     # Rebuild the deterministic summary from the combined evidence so native
@@ -82,12 +84,14 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
         }
         for e in posture_evidence
     ]
+    combined_summary["native_posture_checks"] = native_posture_checks
     security_summary = score_security_posture(combined_summary)
 
     logger.info(
-        "Security collection: trivy=%s native_posture=%s total=%s",
+        "Security collection: trivy=%s native_posture=%s native_checks=%s total=%s",
         len(trivy_evidence),
         len(posture_evidence),
+        len(native_posture_checks),
         len(security_evidence),
     )
     return {

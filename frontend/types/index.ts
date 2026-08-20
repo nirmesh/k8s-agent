@@ -42,6 +42,16 @@ export interface NativePostureFinding {
   impact?: string | null;
   rule_id?: string | null;
 }
+export interface NativePostureCheck {
+  id: string;
+  title: string;
+  status: "PASS" | "FAIL" | "NOT_VERIFIED" | string;
+  domain: string;
+  severity: string;
+  detail: string;
+  resource?: string | null;
+  recommendation?: string | null;
+}
 export interface SecuritySummary {
   status: "AVAILABLE" | "UNAVAILABLE"; reason?: string | null; cluster_security_score: number | null; score_basis?: string;
   scored_vulnerabilities?: number; unscored_unknown_vulnerabilities?: number; total_vulnerabilities: number;
@@ -49,6 +59,7 @@ export interface SecuritySummary {
   total_misconfigurations: number; total_exposed_secrets: number; workload_count?: number; affected_workloads?: number; affected_namespaces?: number;
   critical_workloads?: SecurityWorkload[]; high_risk_namespaces?: { namespace: string; average_score: number }[]; top_10_risks: SecurityWorkload[]; top_recommendations: string[];
   native_posture_findings?: NativePostureFinding[];
+  native_posture_checks?: NativePostureCheck[];
 }
 export interface Investigation {
   id: string; status: string; steps: { name: string; completed: boolean; timestamp: string }[]; diagnosis: Diagnosis | null; remediation_plan: RemediationPlan | null;

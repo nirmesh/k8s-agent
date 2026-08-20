@@ -15,10 +15,22 @@ const severityClass = (severity: string) => {
   }
 };
 
+const checkStatusClass = (status: string) => {
+  switch (status) {
+    case "PASS": return "bg-emerald-500/10 text-emerald-300 border-emerald-500/20";
+    case "FAIL": return "bg-rose-500/10 text-rose-300 border-rose-500/20";
+    default: return "bg-amber-500/10 text-amber-300 border-amber-500/20";
+  }
+};
+
 const infoContent: Record<string, { title: string; text: string }> = {
   posture: {
     title: "What is Native Kubernetes Posture?",
     text: "Read-only checks against the live Kubernetes API. These checks identify risky configuration such as privileged containers, host access, excessive capabilities and weak workload security settings. Severity describes potential security impact; Impact explains what could happen if the condition is abused."
+  },
+  controls: {
+    title: "What are control-plane checks?",
+    text: "These checks show the security state of important Kubernetes controls even when there is no finding. PASS means the control was positively verified, FAIL means a risky state was verified, and NOT VERIFIED means the application could not prove the configuration from the live API."
   },
   privileged: {
     title: "Why is privileged dangerous?",
@@ -44,6 +56,7 @@ function InfoTip({ kind, label = "Security information" }: { kind: string; label
 export default function SecuritySummary({ summary }: Props) {
   const [expandedSection, setExpandedSection] = useState(false);
   const [postureOpen, setPostureOpen] = useState(true);
+  const [controlsOpen, setControlsOpen] = useState(true);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [workloadsOpen, setWorkloadsOpen] = useState(false);
   const [expandedWorkloads, setExpandedWorkloads] = useState<Record<number, boolean>>({});
@@ -57,6 +70,7 @@ export default function SecuritySummary({ summary }: Props) {
   const top = summary.top_10_risks || [];
   const workloadCount = summary.affected_workloads ?? summary.workload_count ?? 0;
   const nativePosture = summary.native_posture_findings || [];
+  const postureChecks = summary.native_posture_checks || [];
   const toggleWorkload = (idx: number) => setExpandedWorkloads((prev) => ({ ...prev, [idx]: !prev[idx] }));
   const togglePosture = (idx: number) => setExpandedPosture((prev) => ({ ...prev, [idx]: !prev[idx] }));
 
@@ -67,7 +81,7 @@ export default function SecuritySummary({ summary }: Props) {
         <span className="shrink-0 text-slate-400">{expandedSection ? "▲" : "▼"}</span>
       </button>
 
-      {!expandedSection && <div className="flex flex-wrap items-center gap-2 border-t border-slate-700/20 px-6 py-3 text-xs text-slate-500"><span>{nativePosture.length} native posture findings</span><span>·</span><span>{workloadCount} affected workloads</span><span>·</span><span>Scanner evidence available</span><span className="ml-auto text-slate-600">Expand for details</span></div>}
+      {!expandedSection && <div className="flex flex-wrap items-center gap-2 border-t border-slate-700/20 px-6 py-3 text-xs text-slate-500"><span>{nativePosture.length} native posture findings</span><span>·</span><span>{workloadCount} affected workloads</span><span>·</span><span>{postureChecks.length} control checks</span><span className="ml-auto text-slate-600">Expand for details</span></div>}
 
       {expandedSection && <div className="border-t border-slate-700/20 p-6">
         <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3">
@@ -75,6 +89,19 @@ export default function SecuritySummary({ summary }: Props) {
           <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Affected Workloads</p><p className="text-xl font-semibold text-slate-100">{workloadCount}</p></div>
           <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Namespaces</p><p className="text-xl font-semibold text-slate-100">{summary.affected_namespaces ?? 0}</p></div>
         </div>
+
+        {postureChecks.length > 0 && <div className="mb-6 overflow-hidden rounded-xl border border-violet-500/20 bg-violet-950/10">
+          <button type="button" onClick={() => setControlsOpen((v) => !v)} className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-violet-950/20" aria-expanded={controlsOpen}>
+            <div className="flex min-w-0 items-center gap-2"><div><p className="text-sm font-semibold uppercase tracking-wider text-violet-300">Control Plane &amp; Datastore</p><p className="mt-1 text-xs text-slate-500">Verified security controls from the live Kubernetes API</p></div><InfoTip kind="controls" label="About control-plane security checks" /></div>
+            <div className="flex shrink-0 items-center gap-3"><span className="rounded-full bg-violet-500/10 px-2.5 py-1 text-xs font-semibold text-violet-300">{postureChecks.length} checks</span><span className="text-slate-400">{controlsOpen ? "▲" : "▼"}</span></div>
+          </button>
+          {controlsOpen && <div className="border-t border-violet-500/10 p-4"><div className="grid gap-2 md:grid-cols-2">
+            {postureChecks.map((check) => <div key={check.id} className="rounded-lg border border-slate-700/40 bg-slate-950/60 p-3">
+              <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="text-sm font-medium text-slate-100">{check.title}</p><p className="mt-1 text-xs leading-5 text-slate-500">{check.detail}</p>{check.resource && <p className="mt-1 break-all font-mono text-[10px] text-slate-600">{check.resource}</p>}</div><span className={`shrink-0 rounded-md border px-2 py-1 text-[10px] font-semibold tracking-wide ${checkStatusClass(check.status)}`}>{check.status === "NOT_VERIFIED" ? "NOT VERIFIED" : check.status}</span></div>
+              {check.status === "FAIL" && check.recommendation && <p className="mt-2 text-xs text-slate-500"><b className="text-slate-400">Recommendation:</b> {check.recommendation}</p>}
+            </div>)}
+          </div></div>}
+        </div>}
 
         {nativePosture.length > 0 && <div className="mb-6 overflow-hidden rounded-xl border border-cyan-500/20 bg-cyan-950/10">
           <button type="button" onClick={() => setPostureOpen((v) => !v)} className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-cyan-950/20" aria-expanded={postureOpen}>
