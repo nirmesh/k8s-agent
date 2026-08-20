@@ -26,12 +26,12 @@ _INFRA_NAMESPACES = {"kube-system", "kube-public", "kube-node-lease", "calico-sy
 _INFRA_PREFIXES = ("calico", "cilium", "kube-proxy", "nvidia", "gpu-operator", "metallb", "ingress", "longhorn", "rook", "node-exporter", "flannel", "weave", "multus", "aws-node", "azure-ip-masq-agent")
 
 
-def _is_expected_infrastructure(meta: dict[str, Any], spec: dict[str, Any]) -> bool:
+def _is_expected_infrastructure(meta: dict[str, Any]) -> bool:
     ns = str(meta.get("namespace", "default"))
     name = str(meta.get("name", "")).lower()
+    labels = {str(k).lower(): str(v).lower() for k, v in (meta.get("labels") or {}).items()}
     owners = meta.get("ownerReferences") or meta.get("owner_references") or []
     owner_kinds = {str(o.get("kind", "")).lower() for o in owners}
-    labels = {str(k).lower(): str(v).lower() for k, v in (meta.get("labels") or {}).items()}
     return ns in _INFRA_NAMESPACES or name.startswith(_INFRA_PREFIXES) or (bool(owner_kinds & {"daemonset", "statefulset"}) and ("app.kubernetes.io/component" in labels or "k8s-app" in labels)) or any("operator" in value or "cni" in value for value in labels.values())
 
 
@@ -40,11 +40,11 @@ def _pod_posture(toolkit: Any, findings: list[SecurityEvidence]) -> None:
         meta, spec = pod.get("metadata") or {}, pod.get("spec") or {}
         name, ns = meta.get("name", "unknown"), meta.get("namespace", "default")
         resource = f"Pod/{ns}/{name}"
-        expected_infra = _is_expected_infrastructure(meta, spec)
+        expected_infra = _is_expected_infrastructure(meta)
         if _field(spec, "hostNetwork", False):
             findings.append(_finding(rule_id="K8S-POSTURE-HOSTNETWORK", title="Pod uses hostNetwork", description=f"{resource} shares the node network namespace.", severity="MEDIUM" if expected_infra else "HIGH", resource=resource, domain=SecurityDomain.NETWORK, recommendation="Keep hostNetwork only when the infrastructure component requires it; otherwise use normal pod networking.", impact="A compromised workload can gain direct access to node-network services and bypass normal pod-network isolation."))
         if _field(spec, "hostPID", False):
-            findings.append(_finding(rule_id="K8S-POSTURE-HOSTPID", title="Pod uses hostPID", description=f"{resource} shares the node process namespace.", severity="MEDIUM" if expected_infra else "HIGH", resource=resource, domain=SecurityDomain.RUNTIME, recommendation="Remove hostPID unless explicitly required by the workload.", impact="Process namespace sharing can expose host processes to a compromised workload."))
+            findings.append(_finding(rule_id="K8S-POSTURE-HOSTPID", title="Pod uses hostPID", description=f"{resource} shares the node process namespace.", severity="MEDIUM" if expected_infra else "HIGH", resource=resource, domain=SecurityDomain.RUNTIME, recommendation="Remove hostPID unless the workload has a documented host-level requirement.", impact="Process namespace sharing can expose host processes to a compromised workload."))
         for container in spec.get("containers") or []:
             security = _field(container, "securityContext", {}) or {}
             cname = container.get("name", "unknown")
@@ -73,29 +73,45 @@ def _rbac_posture(toolkit: Any, findings: list[SecurityEvidence]) -> None:
         role_bindings = [toolkit_module.K8sToolkit._serialize(x) for x in (api.list_role_binding_for_all_namespaces().items or [])]
     except Exception:
         return
+
+    # system:masters -> cluster-admin is Kubernetes' standard bootstrap binding.
+    # It is not an application identity and must never create an application attack path.
     for binding in bindings:
         role_ref = binding.get("role_ref") or binding.get("roleRef") or {}
         if role_ref.get("name") != "cluster-admin":
             continue
+        binding_name = binding.get("metadata", {}).get("name", "unknown")
         for subject in binding.get("subjects") or []:
             kind, name = subject.get("kind", ""), subject.get("name", "")
-            if kind == "ServiceAccount" and name.startswith(("system:", "default")):
+            if kind == "Group" and name == "system:masters":
                 continue
-            findings.append(_finding(rule_id="K8S-POSTURE-RBAC-CLUSTERADMIN", title="Cluster-admin binding grants broad control", description=f"ClusterRoleBinding {binding.get('metadata', {}).get('name', 'unknown')} grants cluster-admin to {kind}:{name}.", severity="HIGH", resource=f"ClusterRoleBinding/cluster/{binding.get('metadata', {}).get('name', 'unknown')}", domain=SecurityDomain.IDENTITY, recommendation="Replace cluster-admin with a least-privilege role scoped to the required resources and verbs.", impact="A compromised identity with cluster-admin can control workloads, secrets and cluster configuration."))
+            if kind == "ServiceAccount":
+                ns = subject.get("namespace") or "default"
+                if ns in _INFRA_NAMESPACES:
+                    continue
+                findings.append(_finding(rule_id="K8S-POSTURE-RBAC-CLUSTERADMIN", title="Application service account has cluster-admin", description=f"ClusterRoleBinding {binding_name} grants cluster-admin to ServiceAccount {ns}/{name}.", severity="HIGH", resource=f"ServiceAccount/{ns}/{name}", domain=SecurityDomain.IDENTITY, recommendation="Replace cluster-admin with a least-privilege Role or narrowly scoped ClusterRole containing only the permissions this service account requires.", impact="A compromised application service account can control cluster-wide workloads, RBAC and sensitive resources."))
+            elif kind in {"User", "Group"}:
+                findings.append(_finding(rule_id="K8S-POSTURE-RBAC-CLUSTERADMIN", title="Cluster-admin granted to user or group", description=f"ClusterRoleBinding {binding_name} grants cluster-admin to {kind} {name}. This identity is not attributed to an application workload without an explicit workload-to-identity relationship.", severity="HIGH", resource=f"ClusterRoleBinding/cluster/{binding_name}", domain=SecurityDomain.IDENTITY, recommendation="Verify that this user/group genuinely requires cluster-admin. Prefer least privilege for routine administration and separate break-glass access.", impact="A compromised member of this identity can obtain cluster-wide administrative control."))
+
     for role in roles:
+        role_name = role.get("metadata", {}).get("name", "unknown")
+        if role_name == "cluster-admin":
+            continue
         for rule in role.get("rules") or []:
-            if "*" in set(rule.get("verbs") or []) and "*" in set(rule.get("resources") or []) and role.get("metadata", {}).get("name") != "cluster-admin":
-                findings.append(_finding(rule_id="K8S-POSTURE-RBAC-WILDCARD", title="RBAC role uses wildcard verbs and resources", description=f"ClusterRole {role.get('metadata', {}).get('name', 'unknown')} grants wildcard verbs over wildcard resources.", severity="HIGH", resource=f"ClusterRole/cluster/{role.get('metadata', {}).get('name', 'unknown')}", domain=SecurityDomain.IDENTITY, recommendation="Replace wildcard permissions with an explicit allow-list of required resources and verbs.", impact="Wildcard RBAC permissions can turn a compromised identity into broad cluster control."))
+            if "*" in set(rule.get("verbs") or []) and "*" in set(rule.get("resources") or []):
+                findings.append(_finding(rule_id="K8S-POSTURE-RBAC-WILDCARD", title="RBAC role uses wildcard verbs and resources", description=f"ClusterRole {role_name} grants wildcard verbs over wildcard resources.", severity="HIGH", resource=f"ClusterRole/cluster/{role_name}", domain=SecurityDomain.IDENTITY, recommendation="Replace wildcard permissions with an explicit allow-list of required resources and verbs.", impact="Wildcard RBAC permissions can turn a compromised identity into broad cluster control."))
+
     for binding in role_bindings:
         role_ref = binding.get("role_ref") or binding.get("roleRef") or {}
         if role_ref.get("name") != "cluster-admin":
             continue
         for subject in binding.get("subjects") or []:
-            if subject.get("kind") == "ServiceAccount":
-                ns = subject.get("namespace") or binding.get("metadata", {}).get("namespace") or "default"
-                name = subject.get("name", "unknown")
-                if ns not in _INFRA_NAMESPACES:
-                    findings.append(_finding(rule_id="K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN", title="Namespaced service account has cluster-admin", description=f"ServiceAccount {ns}/{name} is bound to cluster-admin.", severity="HIGH", resource=f"ServiceAccount/{ns}/{name}", domain=SecurityDomain.IDENTITY, recommendation="Scope the service account to a namespaced Role with only required permissions.", impact="A compromised application service account can escalate from namespace access to cluster-wide control."))
+            if subject.get("kind") != "ServiceAccount":
+                continue
+            ns = subject.get("namespace") or binding.get("metadata", {}).get("namespace") or "default"
+            name = subject.get("name", "unknown")
+            if ns not in _INFRA_NAMESPACES:
+                findings.append(_finding(rule_id="K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN", title="Namespaced service account has cluster-admin", description=f"ServiceAccount {ns}/{name} is bound to cluster-admin.", severity="HIGH", resource=f"ServiceAccount/{ns}/{name}", domain=SecurityDomain.IDENTITY, recommendation="Scope the service account to a namespaced Role with only required permissions.", impact="A compromised application service account can escalate from namespace access to cluster-wide control."))
 
 
 def _control_plane_posture(toolkit: Any, findings: list[SecurityEvidence]) -> None:
@@ -103,18 +119,20 @@ def _control_plane_posture(toolkit: Any, findings: list[SecurityEvidence]) -> No
     by_name = {str((p.get("metadata") or {}).get("name", "")): p for p in items}
     apiserver = next((p for n, p in by_name.items() if n.startswith("kube-apiserver")), None)
     etcd = next((p for n, p in by_name.items() if n.startswith("etcd-")), None)
+
     def args_for(pod: dict[str, Any]) -> list[str]:
         out: list[str] = []
         for c in (pod.get("spec") or {}).get("containers") or []:
             out.extend(c.get("command") or [])
             out.extend(c.get("args") or [])
         return [str(x) for x in out]
+
     if apiserver:
         args = args_for(apiserver)
         resource = f"Pod/kube-system/{(apiserver.get('metadata') or {}).get('name', 'kube-apiserver')}"
         if not any(a.startswith("--authorization-mode=") and "RBAC" in a for a in args):
             findings.append(_finding(rule_id="K8S-POSTURE-APISERVER-RBAC", title="API server does not advertise RBAC authorization mode", description="The kube-apiserver static pod arguments do not show authorization-mode containing RBAC.", severity="HIGH", resource=resource, domain=SecurityDomain.CONTROL_PLANE, recommendation="Enable RBAC authorization and verify it is enforced alongside any other required authorization modes.", impact="Without RBAC, authorization can be weaker or rely on a less explicit policy model."))
-        if any(a == "--anonymous-auth=true" or a.startswith("--anonymous-auth=true") for a in args):
+        if any(a == "--anonymous-auth=true" for a in args):
             findings.append(_finding(rule_id="K8S-POSTURE-ANONYMOUS-AUTH", title="API server allows anonymous authentication", description="kube-apiserver explicitly enables anonymous authentication.", severity="HIGH", resource=resource, domain=SecurityDomain.CONTROL_PLANE, recommendation="Disable anonymous authentication unless a documented component requires it.", impact="Anonymous access increases the chance that unauthenticated requests reach API authorization paths."))
         if not any(a.startswith("--encryption-provider-config=") for a in args):
             findings.append(_finding(rule_id="K8S-POSTURE-ETCD-ENCRYPTION", title="API server does not advertise an encryption provider config", description="No --encryption-provider-config argument is visible on kube-apiserver; encryption at rest of API objects in etcd is therefore not evidenced by static pod configuration.", severity="HIGH", resource=resource, domain=SecurityDomain.CONTROL_PLANE, recommendation="Configure encryption at rest with an encryption-provider-config and verify it covers sensitive resources such as Secrets.", impact="Without encryption at rest, sensitive Kubernetes objects stored in etcd may be readable if the datastore is compromised."))
