@@ -41,7 +41,7 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
     workloads = summary.get("top_10_risks") or []
     paths: list[dict[str, Any]] = []
 
-    # Workload -> node: privileged application workload exposed to the network.
+    # Workload -> node: only a verified application privileged finding qualifies.
     for workload in workloads:
         ns, name = str(workload.get("namespace") or "default"), str(workload.get("name") or "")
         if not name or not workload.get("internet_facing") or not workload.get("privileged"):
@@ -65,10 +65,16 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
             "Remove privileged=true from the application workload and grant only the capabilities it actually requires.",
         ))
 
-    # Workload -> cluster: privileged workload + excessive cluster-admin.
+    # Workload -> cluster: only verified application privileged findings are paired with RBAC risk.
     if "K8S-POSTURE-RBAC-CLUSTERADMIN" in rules or "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN" in rules:
         rbac = next((f for f in findings if f.get("rule_id") in {"K8S-POSTURE-RBAC-CLUSTERADMIN", "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN"}), None)
-        privileged_workloads = [w for w in workloads if w.get("privileged")]
+        privileged_resources = {
+            str(f.get("resource")) for f in findings if f.get("rule_id") == "K8S-POSTURE-PRIVILEGED"
+        }
+        privileged_workloads = [
+            w for w in workloads
+            if f"Pod/{w.get('namespace', 'default')}/{w.get('name', '')}" in privileged_resources
+        ]
         if privileged_workloads and rbac:
             paths.append(_path(
                 "AP-PRIVILEGE-RBAC-CLUSTER",
@@ -85,7 +91,6 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
                 "Remove cluster-admin from application identities first, then remove unnecessary privileged access from application workloads.",
             ))
 
-    # Cluster identity -> secrets: cluster-admin + missing encryption-at-rest evidence.
     encryption_failed = any(c.get("id") == "K8S-DATASTORE-ENCRYPTION" and c.get("status") == "FAIL" for c in (summary.get("native_posture_checks") or []))
     if ("K8S-POSTURE-RBAC-CLUSTERADMIN" in rules or "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN" in rules) and encryption_failed:
         paths.append(_path(
@@ -103,11 +108,10 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
             "Reduce cluster-admin exposure, then configure and verify encryption at rest for sensitive Kubernetes resources.",
         ))
 
-    # Network isolation: namespaces without policy + an affected workload.
     if "K8S-POSTURE-NETWORKPOLICY-ABSENT" in rules:
         no_policy = [f for f in findings if f.get("rule_id") == "K8S-POSTURE-NETWORKPOLICY-ABSENT"]
         if no_policy:
-            path = _path(
+            paths.append(_path(
                 "AP-NETWORK-LATERAL-MOVEMENT",
                 "Missing network isolation increases lateral-movement risk",
                 "MEDIUM", 70,
@@ -120,8 +124,7 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
                 ["K8S-POSTURE-NETWORKPOLICY-ABSENT"],
                 {"workloads": int(summary.get("affected_workloads") or summary.get("workload_count") or 0), "namespaces": len(no_policy)},
                 "Define default-deny NetworkPolicies and explicitly allow required ingress and egress flows.",
-            )
-            paths.append(path)
+            ))
 
     paths.sort(key=lambda item: (-int(item["risk_score"]), item["id"]))
     highest = paths[0] if paths else None
