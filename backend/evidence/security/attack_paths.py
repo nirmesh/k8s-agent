@@ -38,54 +38,19 @@ def _native_risk_paths(summary: dict[str, Any]) -> list[dict[str, Any]]:
     """
     paths: list[dict[str, Any]] = []
     mapping = {
-        "K8S-POSTURE-PRIVILEGED": (
-            "CRITICAL", 95, "Privileged application workload can cross the container isolation boundary",
-            "A verified application pod runs privileged=true. If that workload is compromised, the elevated privileges materially increase the chance and impact of node compromise.",
-            "Remove privileged=true and grant only the Linux capabilities actually required.",
-            "Potential node-level control",
-        ),
-        "K8S-POSTURE-HOSTPATH": (
-            "HIGH", 85, "Application hostPath access can expose node filesystem resources",
-            "A verified application pod mounts hostPath storage. If the workload is compromised, the host filesystem exposure can materially increase node-level impact.",
-            "Replace hostPath with a PVC or dedicated interface unless host filesystem access is explicitly required.",
-            "Potential node filesystem access",
-        ),
-        "K8S-POSTURE-HOSTPID": (
-            "HIGH", 82, "Host PID namespace sharing increases node compromise impact",
-            "A verified application pod shares the host process namespace. A compromised process can gain visibility into host processes and weaken process isolation.",
-            "Remove hostPID unless the workload has a documented host-level requirement.",
-            "Potential host process visibility",
-        ),
-        "K8S-POSTURE-DANGEROUS-CAPABILITIES": (
-            "HIGH", 80, "Dangerous Linux capabilities weaken workload isolation",
-            "A verified application pod adds powerful Linux capabilities. If the workload is compromised, those capabilities can expand the attacker's ability to interact with the node or kernel.",
-            "Drop unnecessary capabilities and add back only the exact capability required.",
-            "Potential node/kernel impact",
-        ),
-        "K8S-POSTURE-RBAC-CLUSTERADMIN": (
-            "CRITICAL", 98, "Compromised cluster-admin identity can control the cluster",
-            "A non-infrastructure identity was verified with cluster-admin. If that identity is compromised, the Kubernetes API exposes cluster-wide control over workloads, RBAC and sensitive resources.",
-            "Replace cluster-admin with a least-privilege role scoped to the required resources and verbs.",
-            "Cluster-wide control",
-        ),
-        "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN": (
-            "CRITICAL", 96, "Application service account has cluster-admin access",
-            "A namespaced service account outside the expected infrastructure namespaces was verified with cluster-admin. Compromise of that workload identity can become a cluster-wide control path.",
-            "Scope the service account to a namespaced Role with only required permissions.",
-            "Cluster-wide control",
-        ),
-        "K8S-POSTURE-RBAC-WILDCARD": (
-            "HIGH", 88, "Wildcard RBAC permissions create a privilege-escalation path",
-            "A non-cluster-admin ClusterRole was verified with wildcard verbs over wildcard resources. A compromised identity bound to it may have broader control than intended.",
-            "Replace wildcard permissions with an explicit allow-list of required resources and verbs.",
-            "Broad Kubernetes API control",
-        ),
-        "K8S-POSTURE-NETWORKPOLICY-ABSENT": (
-            "MEDIUM", 70, "Missing network isolation increases lateral-movement risk",
-            "A verified application namespace has no NetworkPolicy. This does not prove lateral movement is possible, but pod-to-pod reachability may be broader than intended depending on the CNI configuration.",
-            "Define a default-deny NetworkPolicy and explicitly allow required ingress and egress flows.",
-            "Potential lateral movement",
-        ),
+        "K8S-POSTURE-PRIVILEGED": ("CRITICAL", 95, "Privileged application workload can cross the container isolation boundary", "A verified application pod runs privileged=true. If that workload is compromised, the elevated privileges materially increase the chance and impact of node compromise.", "Remove privileged=true and grant only the Linux capabilities actually required.", "Potential node-level control"),
+        "K8S-POSTURE-HOSTPATH": ("HIGH", 85, "Application hostPath access can expose node filesystem resources", "A verified application pod mounts hostPath storage. If the workload is compromised, the host filesystem exposure can materially increase node-level impact.", "Replace hostPath with a PVC or dedicated interface unless host filesystem access is explicitly required.", "Potential node filesystem access"),
+        "K8S-POSTURE-HOSTPID": ("HIGH", 82, "Host PID namespace sharing increases node compromise impact", "A verified application pod shares the host process namespace. A compromised process can gain visibility into host processes and weaken process isolation.", "Remove hostPID unless the workload has a documented host-level requirement.", "Potential host process visibility"),
+        "K8S-POSTURE-DANGEROUS-CAPABILITIES": ("HIGH", 80, "Dangerous Linux capabilities weaken workload isolation", "A verified application pod adds powerful Linux capabilities. If the workload is compromised, those capabilities can expand the attacker's ability to interact with the node or kernel.", "Drop unnecessary capabilities and add back only the exact capability required.", "Potential node/kernel impact"),
+        "K8S-POSTURE-RBAC-CLUSTERADMIN": ("CRITICAL", 98, "Compromised cluster-admin identity can control the cluster", "A non-infrastructure identity was verified with cluster-admin. If that identity is compromised, the Kubernetes API exposes cluster-wide control over workloads, RBAC and sensitive resources.", "Replace cluster-admin with a least-privilege role scoped to the required resources and verbs.", "Cluster-wide control"),
+        "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN": ("CRITICAL", 96, "Application service account has cluster-admin access", "A namespaced service account outside the expected infrastructure namespaces was verified with cluster-admin. Compromise of that workload identity can become a cluster-wide control path.", "Scope the service account to a namespaced Role with only required permissions.", "Cluster-wide control"),
+        "K8S-POSTURE-RBAC-WILDCARD": ("HIGH", 88, "Wildcard RBAC permissions create a privilege-escalation path", "A non-cluster-admin ClusterRole was verified with wildcard verbs over wildcard resources. A compromised identity bound to it may have broader control than intended.", "Replace wildcard permissions with an explicit allow-list of required resources and verbs.", "Broad Kubernetes API control"),
+        "K8S-POSTURE-NETWORKPOLICY-ABSENT": ("MEDIUM", 70, "Missing network isolation increases lateral-movement risk", "A verified application namespace has no NetworkPolicy. This does not prove lateral movement is possible, but pod-to-pod reachability may be broader than intended depending on the CNI configuration.", "Define a default-deny NetworkPolicy and explicitly allow required ingress and egress flows.", "Potential lateral movement"),
+        "K8S-POSTURE-ANONYMOUS-AUTH": ("HIGH", 90, "Anonymous API authentication expands the control-plane attack surface", "The kube-apiserver was verified to allow anonymous authentication. This does not prove anonymous requests are authorized, but it creates an additional unauthenticated request path that must be tightly constrained.", "Disable anonymous authentication unless a documented endpoint or component requires it.", "Potential unauthenticated API access"),
+        "K8S-POSTURE-APISERVER-RBAC": ("HIGH", 86, "API authorization hardening gap can weaken control-plane boundaries", "The kube-apiserver configuration did not evidence RBAC authorization mode. The effective authorization configuration needs verification before assuming least-privilege API access.", "Enable and verify RBAC authorization alongside the other required authorization modes.", "Potential authorization boundary weakness"),
+        "K8S-POSTURE-ETCD-ENCRYPTION": ("HIGH", 88, "Unencrypted API data increases secret exposure after datastore compromise", "The kube-apiserver configuration did not evidence encryption at rest. Kubernetes documents that Secrets and other API objects may otherwise be stored in plaintext in etcd.", "Configure encryption at rest and verify that sensitive resources such as Secrets use an encryption provider.", "Potential sensitive-object disclosure"),
+        "K8S-POSTURE-ETCD-CLIENT-CERT": ("HIGH", 92, "Weak etcd client authentication increases control-plane datastore risk", "The etcd configuration did not evidence client certificate authentication. Direct etcd access is highly sensitive because datastore access can expose or modify cluster state.", "Require client certificate authentication and restrict etcd network access to trusted clients.", "Potential etcd read/write control"),
+        "K8S-POSTURE-ETCD-PEER-CERT": ("MEDIUM", 72, "Weak etcd peer authentication increases datastore trust risk", "The etcd configuration did not evidence peer client certificate authentication. This weakens the trust boundary between datastore members.", "Require peer certificate authentication and verify the peer CA configuration.", "Potential datastore peer compromise"),
     }
 
     for index, finding in enumerate(_findings(summary)):
@@ -117,11 +82,7 @@ def _native_risk_paths(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
-    """Correlate verified security evidence into deterministic attack paths.
-
-    A path means that verified Kubernetes conditions can combine to increase
-    compromise impact. It intentionally does not claim that exploitation occurred.
-    """
+    """Correlate verified security evidence into deterministic attack paths."""
     findings = _findings(summary)
     rules = _rules(summary)
     workloads = summary.get("top_10_risks") or []
@@ -139,7 +100,7 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
                 f"AP-WORKLOAD-NODE-{ns}-{name}",
                 "Internet-facing privileged workload increases node compromise impact",
                 "CRITICAL", 100,
-                f"Pod/{ns}/{name} is internet-facing and a privileged application finding was verified. These conditions can combine to make application compromise materially more dangerous.",
+                f"{workload.get('kind', 'Workload')}/{ns}/{name} is internet-facing and a privileged application finding was verified. These conditions can combine to make application compromise materially more dangerous.",
                 [
                     {"label": "Internet-facing workload", "resource": f"{workload.get('kind', 'Workload')}/{ns}/{name}"},
                     {"label": "Privileged application container", "resource": privileged.get("resource", f"Pod/{ns}/{name}")},
@@ -154,10 +115,7 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
     if "K8S-POSTURE-RBAC-CLUSTERADMIN" in rules or "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN" in rules:
         rbac = next((f for f in findings if f.get("rule_id") in {"K8S-POSTURE-RBAC-CLUSTERADMIN", "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN"}), None)
         privileged_resources = {str(f.get("resource")) for f in findings if f.get("rule_id") == "K8S-POSTURE-PRIVILEGED"}
-        privileged_workloads = [
-            w for w in workloads
-            if f"Pod/{w.get('namespace', 'default')}/{w.get('name', '')}" in privileged_resources
-        ]
+        privileged_workloads = [w for w in workloads if f"Pod/{w.get('namespace', 'default')}/{w.get('name', '')}" in privileged_resources]
         if privileged_workloads and rbac:
             paths.append(_path(
                 "AP-PRIVILEGE-RBAC-CLUSTER",
@@ -174,14 +132,13 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
                 "Remove cluster-admin from application identities first, then remove unnecessary privileged access from application workloads.",
             ))
 
-    # Multi-condition path: cluster-admin + missing encryption-at-rest evidence.
     encryption_failed = any(c.get("id") == "K8S-DATASTORE-ENCRYPTION" and c.get("status") == "FAIL" for c in (summary.get("native_posture_checks") or []))
     if ("K8S-POSTURE-RBAC-CLUSTERADMIN" in rules or "K8S-POSTURE-RBAC-NAMESPACE-CLUSTERADMIN" in rules) and encryption_failed:
         paths.append(_path(
             "AP-RBAC-SECRETS-ETCD",
             "Broad cluster identity access meets unencrypted-at-rest risk",
             "HIGH", 90,
-            "Excessive cluster-admin access was verified while encryption at rest for Kubernetes API objects was not evidenced. A compromised broad identity could expose sensitive objects, while datastore compromise would have greater impact when encryption at rest is absent.",
+            "Excessive cluster-admin access was verified while encryption at rest for Kubernetes API objects was not evidenced.",
             [
                 {"label": "Excessive cluster-admin identity", "resource": "ClusterRoleBinding / ServiceAccount"},
                 {"label": "Kubernetes Secrets and API objects", "resource": "Kubernetes API"},
@@ -192,7 +149,6 @@ def build_attack_paths(summary: dict[str, Any]) -> dict[str, Any]:
             "Reduce cluster-admin exposure, then configure and verify encryption at rest for sensitive Kubernetes resources.",
         ))
 
-    # Deduplicate paths produced by the generic native layer and more specific correlation.
     deduped: dict[str, dict[str, Any]] = {}
     for path in paths:
         key = (path.get("title"), path.get("evidence", [""])[0], path.get("blast_radius", {}).get("workloads"), path.get("blast_radius", {}).get("namespaces"))
