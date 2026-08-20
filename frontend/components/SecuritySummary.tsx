@@ -32,6 +32,10 @@ const infoContent: Record<string, { title: string; text: string }> = {
     title: "What are control-plane checks?",
     text: "These checks show the security state of important Kubernetes controls even when there is no finding. PASS means the control was positively verified, FAIL means a risky state was verified, and NOT VERIFIED means the application could not prove the configuration from the live API."
   },
+  attackPaths: {
+    title: "What is an attack path?",
+    text: "An attack path is a deterministic correlation of multiple verified conditions that can increase compromise impact when combined. It does not prove that an attacker successfully exploited the cluster. The path is based on Kubernetes evidence already collected by the agent."
+  },
   privileged: {
     title: "Why is privileged dangerous?",
     text: "A privileged container receives substantially elevated Linux privileges and can access host-level resources. If an application workload is compromised, this can increase the chance and impact of container escape or node compromise. Some infrastructure components legitimately require elevated access, so context matters."
@@ -57,10 +61,12 @@ export default function SecuritySummary({ summary }: Props) {
   const [expandedSection, setExpandedSection] = useState(false);
   const [postureOpen, setPostureOpen] = useState(true);
   const [controlsOpen, setControlsOpen] = useState(true);
+  const [attackPathsOpen, setAttackPathsOpen] = useState(true);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [workloadsOpen, setWorkloadsOpen] = useState(false);
   const [expandedWorkloads, setExpandedWorkloads] = useState<Record<number, boolean>>({});
   const [expandedPosture, setExpandedPosture] = useState<Record<number, boolean>>({});
+  const [expandedAttackPaths, setExpandedAttackPaths] = useState<Record<number, boolean>>({});
 
   if (!summary) return null;
   if (summary.status === "UNAVAILABLE") {
@@ -71,8 +77,11 @@ export default function SecuritySummary({ summary }: Props) {
   const workloadCount = summary.affected_workloads ?? summary.workload_count ?? 0;
   const nativePosture = summary.native_posture_findings || [];
   const postureChecks = summary.native_posture_checks || [];
+  const attackPaths = summary.attack_paths?.paths || [];
+  const highestImpact = summary.attack_paths?.highest_impact || null;
   const toggleWorkload = (idx: number) => setExpandedWorkloads((prev) => ({ ...prev, [idx]: !prev[idx] }));
   const togglePosture = (idx: number) => setExpandedPosture((prev) => ({ ...prev, [idx]: !prev[idx] }));
+  const toggleAttackPath = (idx: number) => setExpandedAttackPaths((prev) => ({ ...prev, [idx]: !prev[idx] }));
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-700/30 bg-slate-900/60 shadow-lg backdrop-blur">
@@ -81,14 +90,30 @@ export default function SecuritySummary({ summary }: Props) {
         <span className="shrink-0 text-slate-400">{expandedSection ? "▲" : "▼"}</span>
       </button>
 
-      {!expandedSection && <div className="flex flex-wrap items-center gap-2 border-t border-slate-700/20 px-6 py-3 text-xs text-slate-500"><span>{nativePosture.length} native posture findings</span><span>·</span><span>{workloadCount} affected workloads</span><span>·</span><span>{postureChecks.length} control checks</span><span className="ml-auto text-slate-600">Expand for details</span></div>}
+      {!expandedSection && <div className="flex flex-wrap items-center gap-2 border-t border-slate-700/20 px-6 py-3 text-xs text-slate-500"><span>{nativePosture.length} native posture findings</span><span>·</span><span>{workloadCount} affected workloads</span><span>·</span><span>{postureChecks.length} control checks</span><span>·</span><span>{attackPaths.length} attack paths</span><span className="ml-auto text-slate-600">Expand for details</span></div>}
 
       {expandedSection && <div className="border-t border-slate-700/20 p-6">
         <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-3">
           <div className="rounded-xl border border-cyan-500/20 bg-cyan-950/10 p-4"><p className="text-xs uppercase tracking-wider text-cyan-300">Native Posture</p><p className="text-xl font-semibold text-slate-100">{nativePosture.length}</p></div>
           <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Affected Workloads</p><p className="text-xl font-semibold text-slate-100">{workloadCount}</p></div>
-          <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Namespaces</p><p className="text-xl font-semibold text-slate-100">{summary.affected_namespaces ?? 0}</p></div>
+          <div className="rounded-xl border border-slate-700/30 bg-slate-950/50 p-4"><p className="text-xs uppercase tracking-wider text-slate-500">Attack Paths</p><p className="text-xl font-semibold text-slate-100">{attackPaths.length}</p></div>
         </div>
+
+        {attackPaths.length > 0 && <div className="mb-6 overflow-hidden rounded-xl border border-rose-500/20 bg-rose-950/10">
+          <button type="button" onClick={() => setAttackPathsOpen((v) => !v)} className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-rose-950/20" aria-expanded={attackPathsOpen}>
+            <div className="flex min-w-0 items-center gap-2"><div><p className="text-sm font-semibold uppercase tracking-wider text-rose-300">Attack Paths</p><p className="mt-1 text-xs text-slate-500">Verified conditions correlated into plausible compromise chains</p></div><InfoTip kind="attackPaths" label="About attack paths" /></div>
+            <div className="flex shrink-0 items-center gap-3"><span className="rounded-full bg-rose-500/10 px-2.5 py-1 text-xs font-semibold text-rose-300">{attackPaths.length} detected</span><span className="text-slate-400">{attackPathsOpen ? "▲" : "▼"}</span></div>
+          </button>
+          {attackPathsOpen && <div className="border-t border-rose-500/10 p-4">
+            {highestImpact && <div className="mb-4 rounded-xl border border-rose-500/20 bg-slate-950/60 p-4"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-wider text-rose-300">Highest-impact path</p><p className="mt-1 text-sm font-semibold text-slate-100">{highestImpact.title}</p></div><span className={`rounded-md px-2 py-1 text-xs font-semibold ${severityClass(highestImpact.severity)}`}>{highestImpact.severity} · {highestImpact.risk_score}/100</span></div><p className="mt-3 text-sm leading-5 text-slate-400">{highestImpact.summary}</p><p className="mt-3 text-xs leading-5 text-slate-500"><b className="text-slate-400">Highest-impact fix:</b> {highestImpact.recommendation}</p><div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500"><span className="rounded bg-slate-800 px-2 py-1">Blast radius: {highestImpact.blast_radius.workloads} workloads</span><span className="rounded bg-slate-800 px-2 py-1">{highestImpact.blast_radius.namespaces} namespaces</span></div></div>}
+            <div className="space-y-3">{attackPaths.map((path, idx) => { const open = expandedAttackPaths[idx]; return <div key={path.id} className="overflow-hidden rounded-xl border border-slate-700/40 bg-slate-950/60">
+              <button type="button" onClick={() => toggleAttackPath(idx)} className="flex w-full items-start justify-between gap-4 p-4 text-left hover:bg-slate-900/60" aria-expanded={open}>
+                <div className="min-w-0"><div className="mb-1 flex flex-wrap items-center gap-2"><span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${severityClass(path.severity)}`}>{path.severity}</span><span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400">RISK {path.risk_score}</span></div><p className="font-medium text-slate-100">{path.title}</p><p className="mt-1 text-xs leading-5 text-slate-500">{path.summary}</p></div><span className="shrink-0 pt-1 text-slate-400">{open ? "▲" : "▼"}</span>
+              </button>
+              {open && <div className="border-t border-slate-700/40 px-4 pb-4"><div className="mt-3 grid gap-2 md:grid-cols-3">{path.steps.map((step, stepIdx) => <div key={`${path.id}-${stepIdx}`} className="relative rounded-lg border border-slate-700/30 bg-slate-900/50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">Step {stepIdx + 1}</p><p className="mt-1 text-xs font-medium text-slate-200">{step.label}</p><p className="mt-1 break-all font-mono text-[10px] text-slate-600">{step.resource}</p>{stepIdx < path.steps.length - 1 && <span className="absolute -right-2 top-1/2 hidden text-slate-600 md:block">→</span>}</div>)}</div><div className="mt-3 flex flex-wrap gap-2 text-xs text-slate-500"><span className="rounded bg-slate-800 px-2 py-1">Blast radius: {path.blast_radius.workloads} workloads</span><span className="rounded bg-slate-800 px-2 py-1">{path.blast_radius.namespaces} namespaces</span></div><p className="mt-3 text-xs leading-5 text-slate-500"><b className="text-slate-400">Recommended first fix:</b> {path.recommendation}</p><p className="mt-2 text-[10px] leading-4 text-slate-600">Evidence: {path.evidence.join(", ")} · This is a correlated risk path, not proof of successful exploitation.</p></div>}
+            </div>; })}</div>
+          </div>}
+        </div>}
 
         {postureChecks.length > 0 && <div className="mb-6 overflow-hidden rounded-xl border border-violet-500/20 bg-violet-950/10">
           <button type="button" onClick={() => setControlsOpen((v) => !v)} className="flex w-full items-center justify-between gap-4 p-4 text-left hover:bg-violet-950/20" aria-expanded={controlsOpen}>
