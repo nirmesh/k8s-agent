@@ -9,6 +9,7 @@ from backend.agentic.state import InvestigationState
 from backend.ai.diagnosis_synthesizer import ensure_complete_findings_from_incidents, synthesize_incidents, validate_diagnosis
 from backend.core.logging import logger
 from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.attack_paths import build_attack_paths
 from backend.evidence.security.posture import evaluate_cluster_posture
 from backend.evidence.security.posture_checks import collect_native_posture_checks
 from backend.evidence.security.collector import SecuritySummarizer
@@ -50,10 +51,6 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
     native_posture_checks = collect_native_posture_checks(toolkit, posture_evidence)
     security_evidence = trivy_evidence + posture_evidence
 
-    # Rebuild the deterministic summary from the combined evidence so native
-    # Kubernetes posture findings affect workload risk, counts, and score just
-    # like Trivy findings. This keeps scanner/provider names out of the product
-    # contract while preserving source/layer/domain in normalized evidence.
     collection_summary = collection.get("summary") or {}
     node_result = toolkit.get_resources("node", None)
     posture_api_available = bool(node_result.get("success"))
@@ -85,13 +82,15 @@ def collect_security_node(state: InvestigationState) -> dict[str, Any]:
         for e in posture_evidence
     ]
     combined_summary["native_posture_checks"] = native_posture_checks
+    combined_summary["attack_paths"] = build_attack_paths(combined_summary)
     security_summary = score_security_posture(combined_summary)
 
     logger.info(
-        "Security collection: trivy=%s native_posture=%s native_checks=%s total=%s",
+        "Security collection: trivy=%s native_posture=%s native_checks=%s attack_paths=%s total=%s",
         len(trivy_evidence),
         len(posture_evidence),
         len(native_posture_checks),
+        len(combined_summary["attack_paths"].get("paths") or []),
         len(security_evidence),
     )
     return {
@@ -106,7 +105,6 @@ def diagnose_node(state: InvestigationState) -> dict[str, Any]:
     llm_incidents = project_incidents_for_llm(incidents)
     incident = state.get("incident_description") or DEFAULT_INCIDENT
 
-    # The LLM receives compact semantic incidents, not raw Kubernetes observations.
     synthesis = _synthesize_with_trace(llm_incidents, incident)
     synthesis = validate_diagnosis(synthesis, evidence)
     synthesis = ensure_complete_findings_from_incidents(synthesis, incidents)
