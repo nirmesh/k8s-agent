@@ -52,6 +52,24 @@ export interface NativePostureCheck {
   resource?: string | null;
   recommendation?: string | null;
 }
+export interface AttackPathStep { label: string; resource: string; }
+export interface AttackPath {
+  id: string;
+  title: string;
+  severity: string;
+  risk_score: number;
+  summary: string;
+  steps: AttackPathStep[];
+  evidence: string[];
+  blast_radius: { workloads: number; namespaces: number };
+  recommendation: string;
+}
+export interface AttackPathSummary {
+  count: number;
+  paths: AttackPath[];
+  highest_impact?: AttackPath | null;
+  method?: string;
+}
 export interface SecuritySummary {
   status: "AVAILABLE" | "UNAVAILABLE"; reason?: string | null; cluster_security_score: number | null; score_basis?: string;
   scored_vulnerabilities?: number; unscored_unknown_vulnerabilities?: number; total_vulnerabilities: number;
@@ -60,6 +78,7 @@ export interface SecuritySummary {
   critical_workloads?: SecurityWorkload[]; high_risk_namespaces?: { namespace: string; average_score: number }[]; top_10_risks: SecurityWorkload[]; top_recommendations: string[];
   native_posture_findings?: NativePostureFinding[];
   native_posture_checks?: NativePostureCheck[];
+  attack_paths?: AttackPathSummary;
 }
 export interface Investigation {
   id: string; status: string; steps: { name: string; completed: boolean; timestamp: string }[]; diagnosis: Diagnosis | null; remediation_plan: RemediationPlan | null;
