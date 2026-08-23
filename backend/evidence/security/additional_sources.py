@@ -103,8 +103,10 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
         name = str(meta.get("name") or "")
         namespace = str(meta.get("namespace") or "")
         labels = meta.get("labels") or {}
-        text = f"{name} {namespace} {labels}".lower()
-        if "falco" in text:
+        app_name = str(labels.get("app.kubernetes.io/name") or "").lower()
+        if namespace == "falco-operator":
+            continue
+        if app_name == "falco" or name.startswith("falco-") or name == "falco":
             falco_pods.append((namespace, name))
 
     if not falco_pods:
