@@ -10,16 +10,21 @@ def run_investigation(
     progress_callback: Callable[[str], None] | None = None,
     context: str | None = None,
     incident_description: str | None = None,
+    security_precomputed: dict | None = None,
 ) -> dict:
     """Run the read-only evidence-first investigation through LangGraph."""
     logger.info("Starting LangGraph evidence-driven SRE investigation")
     if progress_callback:
         progress_callback("Checking Pods")
 
-    state = graph.invoke(
-        {"context": context, "incident_description": incident_description or DEFAULT_INCIDENT},
-        config={"run_name": "sre_investigation"},
-    )
+    state_input = {
+        "context": context,
+        "incident_description": incident_description or DEFAULT_INCIDENT,
+    }
+    if security_precomputed:
+        state_input["security_precomputed"] = security_precomputed
+
+    state = graph.invoke(state_input, config={"run_name": "sre_investigation"})
 
     evidence = state.get("operational_evidence") or []
     incidents = state.get("correlated_incidents") or []
