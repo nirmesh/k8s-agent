@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from backend.evidence.security.additional_sources import collect_additional_sources
@@ -13,26 +14,15 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
         result = super().collect()
         source_status = collect_additional_sources(self.toolkit, self._add)
 
-        issues = sorted(
-            self.issues.values(),
-            key=lambda x: (-x["score"], x["title"]),
-        )
+        issues = sorted(self.issues.values(), key=lambda x: (-x["score"], x["title"]))
         for index, issue in enumerate(issues, 1):
             issue["rank"] = index
             issue["affected_count"] = len(issue["affected_resources"])
             issue["evidence"] = issue.get("proof") or issue.get("evidence", "")
 
-        result["summary"]["priority_issues"] = issues[:25]
-        result["summary"]["total_unique_issues"] = len(issues)
-        result["summary"]["coverage"] = dict(self.coverage)
-        result["summary"]["source_status"] = source_status
-
-        # Explain the posture score in operator language. The score is a bounded
-        # prioritization signal, not a probability of compromise.
         severity_counts = {
-            "CRITICAL": sum(v for (category, sev), v in self.counts.items() if sev == "CRITICAL"),
-            "HIGH": sum(v for (category, sev), v in self.counts.items() if sev == "HIGH"),
-            "MEDIUM": sum(v for (category, sev), v in self.counts.items() if sev == "MEDIUM"),
+            sev: sum(v for (_, item_sev), v in self.counts.items() if item_sev == sev)
+            for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")
         }
         misconfigs = sum(
             v for (category, _), v in self.counts.items()
@@ -42,25 +32,52 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
                 "kubescape_control",
             }
         )
+        secrets = sum(v for (category, _), v in self.counts.items() if category == "exposed_secret")
         runtime = sum(v for (category, _), v in self.counts.items() if category == "runtime_detection")
-        scanner = sum(v for (category, _), v in self.counts.items() if category in {"vulnerability", "exposed_secret"})
-        breakdown = [
-            {"label": "Critical exposure", "points": severity_counts["CRITICAL"] * 10, "detail": f"{severity_counts['CRITICAL']} critical findings × 10"},
-            {"label": "High exposure", "points": severity_counts["HIGH"] * 4, "detail": f"{severity_counts['HIGH']} high findings × 4"},
-            {"label": "Configuration gaps", "points": misconfigs * 2, "detail": f"{misconfigs} configuration/control failures × 2"},
-            {"label": "Runtime signals", "points": runtime * 3, "detail": f"{runtime} Falco runtime alerts × 3"},
-            {"label": "Scanner evidence", "points": scanner, "detail": f"{scanner} prioritized scanner findings × 1"},
-        ]
-        result["summary"]["score_breakdown"] = breakdown
-        result["summary"]["score_explanation"] = (
-            "The score starts at 100 and is reduced by verified security evidence. "
-            "Critical findings carry the largest penalty, configuration gaps are weighted next, "
-            "and runtime/scanner signals provide smaller prioritization penalties. "
-            "It is deliberately a posture score, not an exploit probability."
+        affected_resources = {r for issue in issues for r in issue["affected_resources"]}
+        workloads = max(1, len(affected_resources))
+
+        # One deterministic formula. The UI exposes the same components so the
+        # operator can see exactly why the score moved.
+        raw_points = (
+            severity_counts["CRITICAL"] * 10
+            + severity_counts["HIGH"] * 4
+            + severity_counts["MEDIUM"]
+            + severity_counts["LOW"] * 0.25
+            + misconfigs * 2
+            + secrets * 15
+            + runtime * 3
         )
-        result["diagnostics"]["source_status"] = source_status
-        result["diagnostics"]["falco_alerts"] = source_status["falco"]["alerts"]
-        result["diagnostics"]["kubescape_failed_controls"] = source_status["kubescape"]["failed_controls"]
+        points_per_workload = raw_points / workloads
+        penalty = min(95.0, 8.0 * math.sqrt(points_per_workload)) if raw_points else 0.0
+        score = max(5, round(100 - penalty)) if raw_points else 100
+
+        result["summary"].update({
+            "cluster_security_score": score,
+            "score_basis": "Verified posture score: weighted security evidence normalized by affected resources. It is a prioritization score, not an exploit probability.",
+            "priority_issues": issues[:25],
+            "total_unique_issues": len(issues),
+            "coverage": dict(self.coverage),
+            "source_status": source_status,
+            "score_breakdown": [
+                {"label": "Critical findings", "points": severity_counts["CRITICAL"] * 10, "detail": f"{severity_counts['CRITICAL']} × 10"},
+                {"label": "High findings", "points": severity_counts["HIGH"] * 4, "detail": f"{severity_counts['HIGH']} × 4"},
+                {"label": "Configuration gaps", "points": misconfigs * 2, "detail": f"{misconfigs} × 2"},
+                {"label": "Exposed secrets", "points": secrets * 15, "detail": f"{secrets} × 15"},
+                {"label": "Falco runtime alerts", "points": runtime * 3, "detail": f"{runtime} × 3"},
+            ],
+            "score_explanation": (
+                f"The cluster starts at 100. Verified risk contributes {raw_points:.0f} weighted points "
+                f"across {workloads} affected resource(s); the normalization prevents a large cluster from "
+                "being punished simply for having more workloads. Critical findings weigh most, then high "
+                "findings, configuration gaps, secrets, and runtime alerts."
+            ),
+        })
+        result["diagnostics"].update({
+            "source_status": source_status,
+            "falco_alerts": source_status["falco"]["alerts"],
+            "kubescape_failed_controls": source_status["kubescape"]["failed_controls"],
+        })
         return result
 
 
