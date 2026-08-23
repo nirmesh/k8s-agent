@@ -21,7 +21,6 @@ DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational i
 
 @traceable(name="k8s.diagnosis.synthesis", run_type="llm")
 def _synthesize_with_trace(incidents: list[dict[str, Any]], incident: str) -> dict[str, Any]:
-    """Trace model synthesis as a nested LangSmith run."""
     return synthesize_incidents(incidents, incident)
 
 
@@ -40,6 +39,12 @@ def normalize_and_correlate_node(state: InvestigationState) -> dict[str, Any]:
 
 
 def collect_security_node(state: InvestigationState) -> dict[str, Any]:
+    precomputed = state.get("security_precomputed")
+    if precomputed:
+        return {
+            "security_evidence": precomputed.get("security_evidence") or [],
+            "security_summary": precomputed.get("security_summary") or {},
+        }
     toolkit = K8sToolkit(context=state.get("context"))
     collection = SecurityEvidenceCollector(toolkit).collect()
     security_evidence = collection.get("evidence") or []
@@ -55,8 +60,6 @@ def diagnose_node(state: InvestigationState) -> dict[str, Any]:
     incidents = state.get("correlated_incidents") or []
     llm_incidents = project_incidents_for_llm(incidents)
     incident = state.get("incident_description") or DEFAULT_INCIDENT
-
-    # The LLM receives compact semantic incidents, not raw Kubernetes observations.
     synthesis = _synthesize_with_trace(llm_incidents, incident)
     synthesis = validate_diagnosis(synthesis, evidence)
     synthesis = ensure_complete_findings_from_incidents(synthesis, incidents)
@@ -137,16 +140,11 @@ def build_graph():
     builder.add_node("collect_security", collect_security_node)
     builder.add_node("diagnose", diagnose_node)
     builder.add_node("expand_evidence", expand_evidence_node)
-
     builder.add_edge(START, "collect_operational")
     builder.add_edge("collect_operational", "normalize_and_correlate")
     builder.add_edge("normalize_and_correlate", "collect_security")
     builder.add_edge("collect_security", "diagnose")
-    builder.add_conditional_edges(
-        "diagnose",
-        route_after_diagnosis,
-        {"expand_evidence": "expand_evidence", "finish": END},
-    )
+    builder.add_conditional_edges("diagnose", route_after_diagnosis, {"expand_evidence": "expand_evidence", "finish": END})
     builder.add_edge("expand_evidence", "normalize_and_correlate")
     return builder.compile()
 
