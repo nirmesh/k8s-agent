@@ -1,5 +1,5 @@
-import Dashboard from "@/components/Dashboard";
+import DashboardSecurity from "@/components/DashboardSecurity";
 
 export default function Home() {
-  return <Dashboard />;
+  return <DashboardSecurity />;
 }
