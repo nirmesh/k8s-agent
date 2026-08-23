@@ -11,5 +11,6 @@ class InvestigationState(TypedDict, total=False):
     correlated_incidents: list[dict[str, Any]]
     security_evidence: list[dict[str, Any]]
     security_summary: dict[str, Any]
+    security_precomputed: dict[str, Any]
     synthesis: dict[str, Any]
     expansion_passes: int
