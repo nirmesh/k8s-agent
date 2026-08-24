@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.kubernetes.toolkit import K8sToolkit
@@ -11,6 +12,7 @@ KUBESCAPE_SOURCES = (
     ("spdx.softwarecomposition.kubescape.io", "workloadconfigurationscansummaries", "v1beta1"),
     ("spisec.armosec.io", "clusterconfigurationscansummaries", "v1beta1"),
 )
+FALCO_LIVE_WINDOW_SECONDS = 5 * 60
 
 FALCO_PRIORITY = {
     "EMERGENCY": "CRITICAL", "ALERT": "CRITICAL", "CRITICAL": "CRITICAL",
@@ -30,6 +32,7 @@ JSON_PRIORITY_PREFIX = re.compile(
 EMBEDDED_FALCO_PRIORITY = re.compile(
     r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
     r"(?P<output>(?:Sensitive file opened for reading.*|.+))$", re.IGNORECASE)
+FALCO_TIME = re.compile(r"(?<!\d)(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2})(?:\.\d+)?")
 CONTAINER_ID_RE = re.compile(r"(?:container_id|container\.id)=(?:containerd://|docker://|cri-o://)?(?P<id>[A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
@@ -42,10 +45,41 @@ def _resource_from_log(payload: dict[str, Any], fallback_namespace: str, fallbac
     return f"Pod/{namespace}/{pod}{suffix}"
 
 
+def _falco_event_age_seconds(line: str) -> float | None:
+    """Return age for Falco's HH:MM:SS prefix; None when no timestamp exists."""
+    match = FALCO_TIME.search(line)
+    if not match:
+        return None
+    now = datetime.now().astimezone()
+    try:
+        event = now.replace(
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            second=int(match.group("second")),
+            microsecond=0,
+        )
+        age = (now - event).total_seconds()
+        # Handle a timestamp just before midnight.
+        if age < -12 * 3600:
+            age += 24 * 3600
+        elif age > 12 * 3600:
+            age -= 24 * 3600
+        return max(0.0, age)
+    except ValueError:
+        return None
+
+
+def _is_live_falco_line(line: str) -> bool:
+    age = _falco_event_age_seconds(line)
+    # Untimestamped formats are retained because the source itself does not
+    # expose enough information to safely age them out.
+    return age is None or age <= FALCO_LIVE_WINDOW_SECONDS
+
+
 def collect_additional_sources(toolkit: K8sToolkit, add: Callable[..., None]) -> dict[str, Any]:
     result = {
         "kubescape": {"installed": False, "reports": 0, "failed_controls": 0, "source": None, "error": None},
-        "falco": {"installed": False, "alerts": 0, "pods": 0, "error": None},
+        "falco": {"installed": False, "alerts": 0, "pods": 0, "error": None, "live_window_seconds": FALCO_LIVE_WINDOW_SECONDS},
     }
     _collect_kubescape(toolkit, add, result["kubescape"])
     _collect_falco(toolkit, add, result["falco"])
@@ -237,6 +271,8 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
             continue
         logs = str((logs_result.get("data") or {}).get("logs") or "")
         for line in logs.splitlines():
+            if not _is_live_falco_line(line):
+                continue
             rule, output, priority, resource, classic = _parse_falco_line(line, namespace, pod)
             if not priority or rule.lower().startswith("falco internal:"):
                 continue
