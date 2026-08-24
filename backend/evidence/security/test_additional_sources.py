@@ -24,6 +24,15 @@ def test_falco_json_output_with_embedded_warning_is_parsed():
     assert classic
 
 
+def test_falco_embedded_warning_is_parsed_even_when_line_is_not_valid_json():
+    line = 'prefix: {"hostname":"nirmesh","output":"06:37:43.346545985: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow container_id=8b8675d6efc1"}'
+    rule, output, priority, resource, classic = _parse_falco_line(line, "falco", "falco-abc")
+    assert priority == "WARNING"
+    assert rule.startswith("Sensitive file opened for reading by non-trusted program")
+    assert "/etc/shadow" in output
+    assert classic
+
+
 def test_kubescape_supports_status_controls_list():
     report = {
         "status": {
