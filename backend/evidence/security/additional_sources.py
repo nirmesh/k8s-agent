@@ -27,6 +27,9 @@ JSON_PRIORITY_PREFIX = re.compile(
     r"^\s*(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*:\s*)?"
     r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
     r"(?P<output>.+)$", re.IGNORECASE)
+EMBEDDED_FALCO_PRIORITY = re.compile(
+    r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
+    r"(?P<output>(?:Sensitive file opened for reading.*|.+))$", re.IGNORECASE)
 CONTAINER_ID_RE = re.compile(r"(?:container_id|container\.id)=(?:containerd://|docker://|cri-o://)?(?P<id>[A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
@@ -180,6 +183,13 @@ def _parse_falco_line(line: str, namespace: str, pod: str) -> tuple[str, str, st
                 output = match.group("output").strip()
                 if not rule:
                     rule = output.split(" | ", 1)[0].strip()
+        if not priority:
+            match = EMBEDDED_FALCO_PRIORITY.search(output)
+            if match:
+                priority = match.group("priority").upper()
+                output = match.group("output").strip()
+                if not rule:
+                    rule = output.split(" | ", 1)[0].strip()
         return rule, output, priority, resource, True
 
     match = KEY_VALUE_FALCO_LINE.search(line)
@@ -187,6 +197,11 @@ def _parse_falco_line(line: str, namespace: str, pod: str) -> tuple[str, str, st
         return match.group("rule").strip(), line.strip(), match.group("priority").upper(), resource, False
 
     match = CLASSIC_FALCO_LINE.match(line.strip())
+    if match:
+        output = match.group("output").strip()
+        return output.split(" | ", 1)[0].strip(), output, match.group("priority").upper(), resource, True
+
+    match = EMBEDDED_FALCO_PRIORITY.search(line)
     if match:
         output = match.group("output").strip()
         return output.split(" | ", 1)[0].strip(), output, match.group("priority").upper(), resource, True
