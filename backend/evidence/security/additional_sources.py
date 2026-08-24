@@ -7,10 +7,9 @@ from typing import Any
 
 from backend.kubernetes.toolkit import K8sToolkit
 
-
 KUBESCAPE_SOURCES = (
-    ("spdx.softwarecomposition.kubescape.io", "workloadconfigurationscansummaries"),
-    ("spisec.armosec.io", "clusterconfigurationscansummaries"),
+    ("spdx.softwarecomposition.kubescape.io", "workloadconfigurationscansummaries", "v1beta1"),
+    ("spisec.armosec.io", "clusterconfigurationscansummaries", "v1beta1"),
 )
 
 FALCO_PRIORITY = {
@@ -21,11 +20,13 @@ FALCO_PRIORITY = {
 
 CLASSIC_FALCO_LINE = re.compile(
     r"^(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*:\s*|[^:]+:\s*)?"
-    r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)"
-    r"\s+(?P<output>.+)$",
-    re.IGNORECASE,
-)
+    r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
+    r"(?P<output>.+)$", re.IGNORECASE)
 KEY_VALUE_FALCO_LINE = re.compile(r"priority=(?P<priority>\w+).*?(?:rule=)(?P<rule>[^|]+)", re.IGNORECASE)
+JSON_PRIORITY_PREFIX = re.compile(
+    r"^\s*(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*:\s*)?"
+    r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
+    r"(?P<output>.+)$", re.IGNORECASE)
 
 
 def _resource_from_log(payload: dict[str, Any], fallback_namespace: str, fallback_pod: str) -> str:
@@ -78,13 +79,19 @@ def _kubescape_severity(control: dict[str, Any]) -> str:
 
 def _collect_kubescape(toolkit: K8sToolkit, add: Callable[..., None], status: dict[str, Any]) -> None:
     attempted = []
-    for group, plural in KUBESCAPE_SOURCES:
-        reports = toolkit.get_custom_resources(group, None, plural)
-        attempted.append(f"{plural}.{group}")
+    for group, plural, version in KUBESCAPE_SOURCES:
+        reports = toolkit.get_custom_resources(group, version, plural)
+        attempted.append(f"{plural}.{group}/{version}")
+        if not reports.get("success"):
+            reports = toolkit.get_custom_resources(group, None, plural)
+            attempted.append(f"{plural}.{group}/discovered")
         if not reports.get("success"):
             continue
+
+        # Successful query + zero items means Kubescape is present but has no
+        # scan results. Do not display NOT DETECTED in that state.
         status["installed"] = True
-        status["source"] = f"{group}/{plural}"
+        status["source"] = f"{group}/{plural}/{(reports.get('data') or {}).get('version') or version}"
         for report in (reports.get("data") or {}).get("items") or []:
             meta = report.get("metadata") or {}
             namespace = str(meta.get("namespace") or "cluster")
@@ -103,7 +110,7 @@ def _collect_kubescape(toolkit: K8sToolkit, add: Callable[..., None], status: di
                     why="Kubescape independently reported this Kubernetes security control as failed.",
                     fix="Review the Kubescape control and remediate the affected workload configuration.",
                     verify="Re-run the Kubescape continuous scan and confirm the control passes.",
-                    issue_key=f"kubescape|{control_id}",
+                    issue_key=f"kubescape|{control_id}|{namespace}|{name}",
                 )
         return
     status["error"] = f"No readable Kubescape result CRD found. Tried: {', '.join(attempted)}"
@@ -113,7 +120,11 @@ def _is_falco_pod(pod: dict[str, Any]) -> bool:
     meta = pod.get("metadata") or {}
     name = str(meta.get("name") or "").lower()
     labels = meta.get("labels") or {}
-    return str(labels.get("app.kubernetes.io/name") or "").lower() == "falco" or str(labels.get("app") or "").lower() == "falco" or name == "falco" or name.startswith("falco-")
+    return (
+        str(labels.get("app.kubernetes.io/name") or "").lower() == "falco"
+        or str(labels.get("app") or "").lower() == "falco"
+        or name == "falco" or name.startswith("falco-")
+    )
 
 
 def _falco_container(pod: dict[str, Any]) -> str | None:
@@ -122,6 +133,51 @@ def _falco_container(pod: dict[str, Any]) -> str | None:
         if preferred in names:
             return preferred
     return names[0] if names else None
+
+
+def _parse_falco_line(line: str, namespace: str, pod: str) -> tuple[str, str, str, str, bool]:
+    payload = None
+    try:
+        candidate = json.loads(line)
+        if isinstance(candidate, dict):
+            payload = candidate
+    except Exception:
+        pass
+
+    resource = f"Pod/{namespace}/{pod}"
+    if payload:
+        priority = str(payload.get("priority") or "").upper()
+        output = str(payload.get("output") or payload.get("rule") or line.strip())
+        rule = str(payload.get("rule") or "")
+        resource = _resource_from_log(payload, namespace, pod)
+
+        # The user's real Falco JSON has only hostname/output, with
+        # "Warning ..." embedded inside output. Parse that representation.
+        match = JSON_PRIORITY_PREFIX.match(output)
+        if match:
+            priority = match.group("priority").upper()
+            output = match.group("output").strip()
+            if not rule:
+                rule = output.split(" | ", 1)[0].strip()
+        elif not priority:
+            match = CLASSIC_FALCO_LINE.match(output)
+            if match:
+                priority = match.group("priority").upper()
+                output = match.group("output").strip()
+                if not rule:
+                    rule = output.split(" | ", 1)[0].strip()
+        return rule, output, priority, resource, True
+
+    match = KEY_VALUE_FALCO_LINE.search(line)
+    if match:
+        return match.group("rule").strip(), line.strip(), match.group("priority").upper(), resource, False
+
+    match = CLASSIC_FALCO_LINE.match(line.strip())
+    if match:
+        output = match.group("output").strip()
+        return output.split(" | ", 1)[0].strip(), output, match.group("priority").upper(), resource, True
+
+    return "", line.strip(), "", resource, False
 
 
 def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[str, Any]) -> None:
@@ -146,49 +202,23 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
         if not logs_result.get("success") and container:
             logs_result = toolkit.get_logs(namespace, pod, tail_lines=100)
         if not logs_result.get("success"):
+            status["error"] = (logs_result.get("error") or {}).get("message") or "Could not read Falco logs"
             continue
         logs = str((logs_result.get("data") or {}).get("logs") or "")
         for line in logs.splitlines():
-            payload = None
-            try:
-                candidate = json.loads(line)
-                if isinstance(candidate, dict):
-                    payload = candidate
-            except Exception:
-                pass
-
-            rule, output, priority = "", line.strip(), ""
-            resource = f"Pod/{namespace}/{pod}"
-            classic = False
-            if payload:
-                rule = str(payload.get("rule") or "")
-                priority = str(payload.get("priority") or "").upper()
-                output = str(payload.get("output") or rule or output)
-                resource = _resource_from_log(payload, namespace, pod)
-            else:
-                match = KEY_VALUE_FALCO_LINE.search(line)
-                if match:
-                    priority, rule = match.group("priority").upper(), match.group("rule").strip()
-                else:
-                    match = CLASSIC_FALCO_LINE.match(line.strip())
-                    if match:
-                        classic = True
-                        priority = match.group("priority").upper()
-                        output = match.group("output").strip()
-                        rule = output[:180]
-
+            rule, output, priority, resource, classic = _parse_falco_line(line, namespace, pod)
             if not priority or rule.lower().startswith("falco internal:"):
                 continue
             severity = FALCO_PRIORITY.get(priority)
             if not severity or severity == "LOW":
                 continue
-            # Classic Falco WARNING/ERROR lines also include startup/config
-            # messages. Only treat them as runtime detections when they carry
-            # event fields or a known security-sensitive path.
-            if classic and not any(marker in output for marker in ("evt_type=", "proc=", "container_name=", "k8s_ns=", "k8s_pod_name=", "/etc/shadow", "/etc/passwd", "/etc/sudoers")):
+            if classic and not any(marker in output for marker in (
+                "evt_type=", "proc=", "container_name=", "k8s_ns=", "k8s_pod_name=",
+                "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+            )):
                 continue
 
-            key = f"{rule}|{resource}"
+            key = f"{rule}|{resource}|{output[:300]}"
             if key in seen_alerts:
                 continue
             seen_alerts.add(key)
@@ -201,5 +231,5 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
                 why="Falco observed runtime behavior matching a security detection rule; this is live runtime evidence rather than a static configuration finding.",
                 fix="Investigate the process/activity first; contain the workload only after confirming the alert is unexpected.",
                 verify="Confirm the runtime alert stops and review the workload/process that generated it.",
-                issue_key=f"falco|{rule}",
+                issue_key=f"falco|{rule}|{resource}",
             )
