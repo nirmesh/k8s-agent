@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.ai.security_explainer import enrich_security_issues
@@ -46,7 +47,6 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
     def collect(self) -> dict[str, Any]:
         self._scan_native()
         source_status = collect_additional_sources(self.toolkit, self._add)
-
         trivy_status = self._trivy_status()
         self._scan_trivy()
         trivy_status["findings"] = sum(1 for i in self.issues.values() if i.get("source") == "trivy-operator")
@@ -55,14 +55,10 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
         issues = list(self.issues.values())
         severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
         issues.sort(key=lambda x: (severity_order.get(str(x.get("severity", "UNKNOWN")).upper(), 4), x.get("title", "")))
-
-        # The provider supplies the facts; the configured LLM writes the
-        # operator-facing explanation for the ten findings shown in the UI.
         priority_seed = self._priority_ten(issues)
         enrich_security_issues(priority_seed, limit=10)
-
-        # Re-sort after any LLM severity classification.
         issues.sort(key=lambda x: (severity_order.get(str(x.get("severity", "UNKNOWN")).upper(), 4), x.get("title", "")))
+
         for index, issue in enumerate(issues, 1):
             issue["rank"] = index
             issue["affected_count"] = len(issue["affected_resources"])
@@ -76,10 +72,12 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
         affected_resources = {r for issue in issues for r in issue["affected_resources"]}
         affected_namespaces = {r.split("/")[1] for r in affected_resources if r.count("/") >= 2}
         priority = self._priority_ten(issues)
+        observed_at = datetime.now(timezone.utc).isoformat()
 
         summary = {
             "status": "AVAILABLE",
             "reason": None,
+            "observed_at": observed_at,
             "cluster_security_score": None,
             "score_basis": "Not used. Findings are classified directly as CRITICAL, HIGH, MEDIUM, LOW, or UNKNOWN.",
             "score_explanation": "No composite risk score is calculated. Severity is based on verified evidence and the security impact classification.",
