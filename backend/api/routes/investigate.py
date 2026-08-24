@@ -6,8 +6,11 @@ from pydantic import BaseModel
 
 from backend.api.dependencies import get_current_user
 from backend.core.database import get_db
+from backend.kubernetes.toolkit import K8sToolkit
 from backend.services.cluster_service import list_clusters
 from backend.services.investigation_runner import create_investigation, run_and_save
+from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.scoring import score_security_posture
 
 router = APIRouter(tags=["investigate"])
 
@@ -44,6 +47,24 @@ def investigate(
     investigation_id = create_investigation(str(user["_id"]))
     background_tasks.add_task(run_and_save, investigation_id, request.context)
     return {"investigation_id": investigation_id, "status": "running"}
+
+
+@router.post("/security-scan")
+def security_scan(
+    request: InvestigateRequest = Body(default=InvestigateRequest()),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Run only the bounded security evidence scan for live dashboard refreshes."""
+    try:
+        collection = SecurityEvidenceCollector(K8sToolkit(context=request.context)).collect()
+        summary = score_security_posture(collection.get("summary") or {})
+        return {
+            "status": "success",
+            "security_summary": summary,
+            "security_evidence": [e.model_dump(mode="json") for e in (collection.get("evidence") or [])],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Security scan failed: {exc}") from exc
 
 
 @router.get("/investigations/{investigation_id}")
