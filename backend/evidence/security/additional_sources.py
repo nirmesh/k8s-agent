@@ -159,6 +159,7 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
 
             rule, output, priority = "", line.strip(), ""
             resource = f"Pod/{namespace}/{pod}"
+            classic = False
             if payload:
                 rule = str(payload.get("rule") or "")
                 priority = str(payload.get("priority") or "").upper()
@@ -171,6 +172,7 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
                 else:
                     match = CLASSIC_FALCO_LINE.match(line.strip())
                     if match:
+                        classic = True
                         priority = match.group("priority").upper()
                         output = match.group("output").strip()
                         rule = output[:180]
@@ -180,6 +182,12 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
             severity = FALCO_PRIORITY.get(priority)
             if not severity or severity == "LOW":
                 continue
+            # Classic Falco WARNING/ERROR lines also include startup/config
+            # messages. Only treat them as runtime detections when they carry
+            # event fields or a known security-sensitive path.
+            if classic and not any(marker in output for marker in ("evt_type=", "proc=", "container_name=", "k8s_ns=", "k8s_pod_name=", "/etc/shadow", "/etc/passwd", "/etc/sudoers")):
+                continue
+
             key = f"{rule}|{resource}"
             if key in seen_alerts:
                 continue
