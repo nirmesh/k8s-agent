@@ -27,6 +27,7 @@ JSON_PRIORITY_PREFIX = re.compile(
     r"^\s*(?:\d{2}:\d{2}:\d{2}(?:\.\d+)?\s*:\s*)?"
     r"(?P<priority>EMERGENCY|ALERT|CRITICAL|ERROR|WARNING|NOTICE|INFORMATIONAL|INFO|DEBUG)\s+"
     r"(?P<output>.+)$", re.IGNORECASE)
+CONTAINER_ID_RE = re.compile(r"(?:container_id|container\.id)=(?:containerd://|docker://|cri-o://)?(?P<id>[A-Za-z0-9_-]+)", re.IGNORECASE)
 
 
 def _resource_from_log(payload: dict[str, Any], fallback_namespace: str, fallback_pod: str) -> str:
@@ -135,6 +136,22 @@ def _falco_container(pod: dict[str, Any]) -> str | None:
     return names[0] if names else None
 
 
+def _container_resource_map(pods: list[dict[str, Any]]) -> dict[str, str]:
+    """Map CRI container IDs from Falco output back to Kubernetes Pods."""
+    mapping: dict[str, str] = {}
+    for pod in pods:
+        meta = pod.get("metadata") or {}
+        namespace = str(meta.get("namespace") or "default")
+        name = str(meta.get("name") or "unknown")
+        for container_status in ((pod.get("status") or {}).get("container_statuses") or []):
+            raw_id = str(container_status.get("container_id") or "")
+            if raw_id:
+                container_id = re.sub(r"^[a-z]+://", "", raw_id)
+                if container_id:
+                    mapping[container_id] = f"Pod/{namespace}/{name}"
+    return mapping
+
+
 def _parse_falco_line(line: str, namespace: str, pod: str) -> tuple[str, str, str, str, bool]:
     payload = None
     try:
@@ -185,8 +202,10 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
     if not pods_result.get("success"):
         status["error"] = (pods_result.get("error") or {}).get("message") or "Could not list pods"
         return
+    all_pods = (pods_result.get("data") or {}).get("items") or []
+    container_resources = _container_resource_map(all_pods)
     falco_pods = []
-    for pod in (pods_result.get("data") or {}).get("items") or []:
+    for pod in all_pods:
         if _is_falco_pod(pod):
             meta = pod.get("metadata") or {}
             falco_pods.append((str(meta.get("namespace") or "default"), str(meta.get("name") or ""), _falco_container(pod)))
@@ -217,6 +236,13 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
                 "/etc/shadow", "/etc/passwd", "/etc/sudoers",
             )):
                 continue
+
+            # Falco output may carry only container_id. Resolve it to the
+            # actual workload so the UI proof points at privileged-demo rather
+            # than the Falco DaemonSet itself.
+            container_match = CONTAINER_ID_RE.search(output)
+            if container_match:
+                resource = container_resources.get(container_match.group("id"), resource)
 
             key = f"{rule}|{resource}|{output[:300]}"
             if key in seen_alerts:
