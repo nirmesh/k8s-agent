@@ -61,6 +61,7 @@ def security_scan(
         return {
             "status": "success",
             "security_summary": summary,
+            "diagnostics": collection.get("diagnostics") or {},
             "security_evidence": [e.model_dump(mode="json") for e in (collection.get("evidence") or [])],
         }
     except Exception as exc:
