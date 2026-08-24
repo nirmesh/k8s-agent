@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from backend.ai.security_explainer import enrich_security_issues
 from backend.evidence.security.additional_sources import collect_additional_sources
 from backend.evidence.security.fast_collector import FastSecurityEvidenceCollector
 
@@ -9,8 +10,8 @@ from backend.evidence.security.fast_collector import FastSecurityEvidenceCollect
 class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
     """Collect native Kubernetes, Trivy, Kubescape and Falco evidence.
 
-    Severity is intentionally explainable: CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN.
-    There is no composite points score in the security summary.
+    Provider detections remain deterministic and evidence-grounded. The LLM is
+    used only to explain and classify the operator-visible priority findings.
     """
 
     @staticmethod
@@ -46,7 +47,6 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
         self._scan_native()
         source_status = collect_additional_sources(self.toolkit, self._add)
 
-        # Trivy is a first-class provider now, not a fallback hidden behind the UI.
         trivy_status = self._trivy_status()
         self._scan_trivy()
         trivy_status["findings"] = sum(1 for i in self.issues.values() if i.get("source") == "trivy-operator")
@@ -54,6 +54,14 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
 
         issues = list(self.issues.values())
         severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "UNKNOWN": 4}
+        issues.sort(key=lambda x: (severity_order.get(str(x.get("severity", "UNKNOWN")).upper(), 4), x.get("title", "")))
+
+        # The provider supplies the facts; the configured LLM writes the
+        # operator-facing explanation for the ten findings shown in the UI.
+        priority_seed = self._priority_ten(issues)
+        enrich_security_issues(priority_seed, limit=10)
+
+        # Re-sort after any LLM severity classification.
         issues.sort(key=lambda x: (severity_order.get(str(x.get("severity", "UNKNOWN")).upper(), 4), x.get("title", "")))
         for index, issue in enumerate(issues, 1):
             issue["rank"] = index
@@ -74,7 +82,7 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
             "reason": None,
             "cluster_security_score": None,
             "score_basis": "Not used. Findings are classified directly as CRITICAL, HIGH, MEDIUM, LOW, or UNKNOWN.",
-            "score_explanation": "No composite risk score is calculated. Severity is based on the security impact of each verified finding.",
+            "score_explanation": "No composite risk score is calculated. Severity is based on verified evidence and the security impact classification.",
             "score_breakdown": [],
             "scored_vulnerabilities": sum(1 for i in issues if i.get("category") == "vulnerability"),
             "unscored_unknown_vulnerabilities": sum(1 for i in issues if i.get("category") == "vulnerability" and i.get("severity") == "UNKNOWN"),
@@ -105,6 +113,7 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
             "source_status": source_status,
             "falco_alerts": source_status["falco"]["alerts"],
             "kubescape_failed_controls": source_status["kubescape"]["failed_controls"],
+            "llm_explanations": sum(1 for i in priority if i.get("explanation_source") == "llm"),
         }
         return {"evidence": self.evidence, "summary": summary, "diagnostics": diagnostics}
 
