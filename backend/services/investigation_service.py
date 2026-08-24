@@ -27,10 +27,21 @@ def run_investigation(
         "normalize_and_correlate": ("Analyzing Events", "Correlating independent signals into incidents"),
         "collect_security": ("Checking Networking", "Merging verified security evidence"),
         "diagnose": ("AI Reasoning", "LLM is explaining verified evidence"),
-        "expand_evidence": ("Reading Logs", "Expanding evidence because the model requested more context"),
+        "expand_evidence": ("Reading Logs", "Expanding evidence because more context was requested"),
     }
+    next_step = {
+        "collect_operational": "Analyzing Events",
+        "normalize_and_correlate": "Checking Networking",
+        "collect_security": "AI Reasoning",
+        "expand_evidence": "Analyzing Events",
+        "diagnose": "Root Cause Found",
+    }
+    step_details = {name: detail for name, detail in node_steps.values()}
 
     state = dict(state_input)
+    if progress_callback:
+        progress_callback("Checking Pods", False, "Collecting live workload and event evidence")
+
     for update in graph.stream(state_input, config={"run_name": "sre_investigation"}):
         if not isinstance(update, dict):
             continue
@@ -42,8 +53,10 @@ def run_investigation(
             if not step or not progress_callback:
                 continue
             name, detail = step
-            progress_callback(name, False, detail)
             progress_callback(name, True, detail)
+            upcoming = next_step.get(node_name)
+            if upcoming and upcoming != "Root Cause Found":
+                progress_callback(upcoming, False, step_details.get(upcoming, "Working with live cluster evidence"))
 
     evidence = state.get("operational_evidence") or []
     incidents = state.get("correlated_incidents") or []
@@ -55,7 +68,6 @@ def run_investigation(
 
     diagnosis = diagnosis_from_synthesis(synthesis, evidence)
     if progress_callback:
-        progress_callback("Root Cause Found", False, "Finalizing the evidence-grounded diagnosis")
         progress_callback("Root Cause Found", True, "Diagnosis validated against collected evidence")
 
     return {
