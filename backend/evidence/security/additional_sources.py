@@ -41,7 +41,7 @@ def _resource_from_log(payload: dict[str, Any], fallback_namespace: str, fallbac
 
 def collect_additional_sources(toolkit: K8sToolkit, add: Callable[..., None]) -> dict[str, Any]:
     result = {
-        "kubescape": {"installed": False, "failed_controls": 0, "source": None, "error": None},
+        "kubescape": {"installed": False, "reports": 0, "failed_controls": 0, "source": None, "error": None},
         "falco": {"installed": False, "alerts": 0, "pods": 0, "error": None},
     }
     _collect_kubescape(toolkit, add, result["kubescape"])
@@ -89,11 +89,12 @@ def _collect_kubescape(toolkit: K8sToolkit, add: Callable[..., None], status: di
         if not reports.get("success"):
             continue
 
-        # Successful query + zero items means Kubescape is present but has no
-        # scan results. Do not display NOT DETECTED in that state.
+        data = reports.get("data") or {}
+        items = data.get("items") or []
         status["installed"] = True
-        status["source"] = f"{group}/{plural}/{(reports.get('data') or {}).get('version') or version}"
-        for report in (reports.get("data") or {}).get("items") or []:
+        status["reports"] = len(items)
+        status["source"] = f"{group}/{plural}/{data.get('version') or version}"
+        for report in items:
             meta = report.get("metadata") or {}
             namespace = str(meta.get("namespace") or "cluster")
             name = str(meta.get("name") or "unknown")
@@ -137,7 +138,6 @@ def _falco_container(pod: dict[str, Any]) -> str | None:
 
 
 def _container_resource_map(pods: list[dict[str, Any]]) -> dict[str, str]:
-    """Map CRI container IDs from Falco output back to Kubernetes Pods."""
     mapping: dict[str, str] = {}
     for pod in pods:
         meta = pod.get("metadata") or {}
@@ -167,9 +167,6 @@ def _parse_falco_line(line: str, namespace: str, pod: str) -> tuple[str, str, st
         output = str(payload.get("output") or payload.get("rule") or line.strip())
         rule = str(payload.get("rule") or "")
         resource = _resource_from_log(payload, namespace, pod)
-
-        # The user's real Falco JSON has only hostname/output, with
-        # "Warning ..." embedded inside output. Parse that representation.
         match = JSON_PRIORITY_PREFIX.match(output)
         if match:
             priority = match.group("priority").upper()
@@ -236,10 +233,6 @@ def _collect_falco(toolkit: K8sToolkit, add: Callable[..., None], status: dict[s
                 "/etc/shadow", "/etc/passwd", "/etc/sudoers",
             )):
                 continue
-
-            # Falco output may carry only container_id. Resolve it to the
-            # actual workload so the UI proof points at privileged-demo rather
-            # than the Falco DaemonSet itself.
             container_match = CONTAINER_ID_RE.search(output)
             if container_match:
                 resource = container_resources.get(container_match.group("id"), resource)
