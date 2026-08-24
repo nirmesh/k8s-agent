@@ -7,15 +7,13 @@ DEFAULT_INCIDENT = "Investigate the Kubernetes cluster for current operational i
 
 
 def run_investigation(
-    progress_callback: Callable[[str], None] | None = None,
+    progress_callback: Callable[..., None] | None = None,
     context: str | None = None,
     incident_description: str | None = None,
     security_precomputed: dict | None = None,
 ) -> dict:
     """Run the read-only evidence-first investigation through LangGraph."""
     logger.info("Starting LangGraph evidence-driven SRE investigation")
-    if progress_callback:
-        progress_callback("Checking Pods")
 
     state_input = {
         "context": context,
@@ -24,7 +22,28 @@ def run_investigation(
     if security_precomputed:
         state_input["security_precomputed"] = security_precomputed
 
-    state = graph.invoke(state_input, config={"run_name": "sre_investigation"})
+    node_steps = {
+        "collect_operational": ("Checking Pods", "Collecting live workload and event evidence"),
+        "normalize_and_correlate": ("Analyzing Events", "Correlating independent signals into incidents"),
+        "collect_security": ("Checking Networking", "Merging verified security evidence"),
+        "diagnose": ("AI Reasoning", "LLM is explaining verified evidence"),
+        "expand_evidence": ("Reading Logs", "Expanding evidence because the model requested more context"),
+    }
+
+    state = dict(state_input)
+    for update in graph.stream(state_input, config={"run_name": "sre_investigation"}):
+        if not isinstance(update, dict):
+            continue
+        for node_name, node_output in update.items():
+            if not isinstance(node_output, dict):
+                continue
+            state.update(node_output)
+            step = node_steps.get(node_name)
+            if not step or not progress_callback:
+                continue
+            name, detail = step
+            progress_callback(name, False, detail)
+            progress_callback(name, True, detail)
 
     evidence = state.get("operational_evidence") or []
     incidents = state.get("correlated_incidents") or []
@@ -34,15 +53,10 @@ def run_investigation(
         "findings": [],
     }
 
-    if progress_callback:
-        progress_callback("Analyzing Events")
-        progress_callback("Inspecting Deployments")
-        progress_callback("Checking Networking")
-        progress_callback("AI Reasoning")
-
     diagnosis = diagnosis_from_synthesis(synthesis, evidence)
     if progress_callback:
-        progress_callback("Root Cause Found")
+        progress_callback("Root Cause Found", False, "Finalizing the evidence-grounded diagnosis")
+        progress_callback("Root Cause Found", True, "Diagnosis validated against collected evidence")
 
     return {
         "pods": {},
