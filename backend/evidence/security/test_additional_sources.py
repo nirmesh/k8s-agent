@@ -1,4 +1,9 @@
-from backend.evidence.security.additional_sources import CLASSIC_FALCO_LINE, _control_items, _kubescape_failed
+from backend.evidence.security.additional_sources import (
+    CLASSIC_FALCO_LINE,
+    _control_items,
+    _kubescape_failed,
+    _parse_falco_line,
+)
 
 
 def test_classic_falco_warning_line_is_parsed():
@@ -7,6 +12,16 @@ def test_classic_falco_warning_line_is_parsed():
     assert match
     assert match.group("priority").upper() == "WARNING"
     assert "/etc/shadow" in match.group("output")
+
+
+def test_falco_json_output_with_embedded_warning_is_parsed():
+    line = '{"hostname":"nirmesh","output":"06:37:43.346545985: Warning Sensitive file opened for reading by non-trusted program | file=/etc/shadow gparent=systemd evt_type=open user=root process=cat container_name=app"}'
+    rule, output, priority, resource, classic = _parse_falco_line(line, "falco", "falco-abc")
+    assert priority == "WARNING"
+    assert rule.startswith("Sensitive file opened for reading by non-trusted program")
+    assert "/etc/shadow" in output
+    assert resource == "Pod/falco/falco-abc"
+    assert classic
 
 
 def test_kubescape_supports_status_controls_list():
