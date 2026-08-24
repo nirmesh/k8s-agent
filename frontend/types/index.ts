@@ -42,7 +42,12 @@ export interface SecuritySummary {
   total_misconfigurations: number; total_exposed_secrets: number; workload_count?: number; affected_workloads?: number; affected_namespaces?: number;
   critical_workloads?: SecurityWorkload[]; high_risk_namespaces?: { namespace: string; average_score: number }[]; top_10_risks: SecurityWorkload[]; top_recommendations: string[];
   priority_issues?: SecurityIssue[]; total_unique_issues?: number; coverage?: Record<string, number>;
-  source_status?: { kubescape?: { installed: boolean; failed_controls: number }; falco?: { installed: boolean; alerts: number } };
+  source_status?: {
+    kubescape?: { installed: boolean; failed_controls: number };
+    falco?: { installed: boolean; alerts: number };
+    trivy?: { installed: boolean; reports: number; findings: number };
+  };
+  severity_counts?: Record<string, number>;
 }
 export interface Investigation {
   id: string; status: string; steps: { name: string; completed: boolean; timestamp: string }[]; diagnosis: Diagnosis | null; remediation_plan: RemediationPlan | null;
