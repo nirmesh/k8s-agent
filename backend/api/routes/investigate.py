@@ -10,6 +10,7 @@ from backend.kubernetes.toolkit import K8sToolkit
 from backend.services.cluster_service import list_clusters
 from backend.services.investigation_runner import create_investigation, run_and_save
 from backend.evidence.security import SecurityEvidenceCollector
+from backend.evidence.security.additional_sources import collect_additional_sources
 from backend.evidence.security.scoring import score_security_posture
 
 router = APIRouter(tags=["investigate"])
@@ -54,7 +55,7 @@ def security_scan(
     request: InvestigateRequest = Body(default=InvestigateRequest()),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """Run only the bounded security evidence scan for live dashboard refreshes."""
+    """Run the full bounded security evidence scan for the dashboard snapshot."""
     try:
         collection = SecurityEvidenceCollector(K8sToolkit(context=request.context)).collect()
         summary = score_security_posture(collection.get("summary") or {})
@@ -66,6 +67,46 @@ def security_scan(
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Security scan failed: {exc}") from exc
+
+
+@router.post("/falco-live")
+def falco_live(
+    request: InvestigateRequest = Body(default=InvestigateRequest()),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Read only recent Falco runtime evidence; do not rerun Trivy or the full posture scan."""
+    try:
+        findings: list[dict] = []
+
+        def add_finding(**finding):
+            findings.append({
+                "id": finding.get("issue_key") or f"falco-live-{len(findings) + 1}",
+                "title": finding.get("title") or "Falco runtime alert",
+                "severity": finding.get("severity") or "UNKNOWN",
+                "score": 0,
+                "category": finding.get("category") or "runtime_detection",
+                "layer": finding.get("layer") or "RUNTIME",
+                "source": "falco",
+                "evidence": finding.get("proof") or "",
+                "why": finding.get("why") or "",
+                "fix": finding.get("fix") or "",
+                "verify": finding.get("verify") or "",
+                "occurrences": 1,
+                "affected_count": 1,
+                "affected_resources": [finding.get("resource")] if finding.get("resource") else [],
+                "explanation_source": "provider",
+            })
+
+        source_status = collect_additional_sources(K8sToolkit(context=request.context), add_finding)
+        falco = source_status.get("falco") or {}
+        return {
+            "status": "success",
+            "falco": falco,
+            "findings": findings,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Falco live evidence failed: {exc}") from exc
 
 
 @router.get("/investigations/{investigation_id}")
