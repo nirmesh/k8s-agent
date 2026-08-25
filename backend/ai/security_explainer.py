@@ -8,7 +8,7 @@ from backend.core.logging import logger
 
 SYSTEM_PROMPT = """You are the security-explanation layer of a Kubernetes security agent.
 
-You receive VERIFIED security findings produced by deterministic providers such as Kubernetes, Trivy, Kubescape and Falco. You do not invent evidence.
+You receive VERIFIED security findings produced by deterministic providers such as Kubernetes, Trivy and Falco. You do not invent evidence.
 
 For each finding:
 - preserve the exact id and evidence facts;
