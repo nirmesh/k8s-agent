@@ -4,7 +4,7 @@ import json
 import os
 import re
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from backend.kubernetes.toolkit import K8sToolkit
@@ -36,14 +36,59 @@ def _resource_from_log(payload: dict[str, Any], fallback_namespace: str, fallbac
     return f"Pod/{namespace}/{pod}" + (f" container={container}" if container else "")
 
 
+def _timestamp_age_seconds(value: Any) -> float | None:
+    """Return age in seconds for Falco's JSON timestamp formats."""
+    if value is None:
+        return None
+    now = datetime.now(timezone.utc)
+    try:
+        if isinstance(value, (int, float)):
+            number = float(value)
+            # Falco integrations may expose seconds, milliseconds or nanoseconds.
+            if number > 1e17:
+                number /= 1e9
+            elif number > 1e14:
+                number /= 1e6
+            elif number > 1e11:
+                number /= 1e3
+            return (now - datetime.fromtimestamp(number, tz=timezone.utc)).total_seconds()
+        text = str(value).strip()
+        if not text:
+            return None
+        event = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if event.tzinfo is None:
+            event = event.replace(tzinfo=timezone.utc)
+        return (now - event.astimezone(timezone.utc)).total_seconds()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _falco_event_age_seconds(line: str) -> float | None:
+    # Prefer Falco's structured event timestamp. This avoids comparing a UTC
+    # JSON timestamp with the backend machine's local timezone.
+    try:
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            for key in ("time", "evt.time", "evt_time", "timestamp"):
+                age = _timestamp_age_seconds(payload.get(key))
+                if age is not None:
+                    return age
+    except Exception:
+        pass
+
+    # Fall back to classic Falco text output containing HH:MM:SS.
     match = FALCO_TIME.search(line)
     if not match:
         return None
-    now = datetime.now().astimezone()
+    now = datetime.now(timezone.utc)
     try:
         micros = int((match.group("fraction") or "")[:6].ljust(6, "0") or 0)
-        event = now.replace(hour=int(match.group("hour")), minute=int(match.group("minute")), second=int(match.group("second")), microsecond=micros)
+        event = now.replace(
+            hour=int(match.group("hour")),
+            minute=int(match.group("minute")),
+            second=int(match.group("second")),
+            microsecond=micros,
+        )
         age = (now - event).total_seconds()
         if age < -12 * 3600:
             age += 24 * 3600
