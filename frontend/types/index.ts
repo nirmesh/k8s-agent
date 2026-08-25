@@ -11,7 +11,7 @@ export interface SecuritySummary {
   scored_vulnerabilities?: number; unscored_unknown_vulnerabilities?: number; total_vulnerabilities: number; critical_vulnerabilities: number; high_vulnerabilities: number; medium_vulnerabilities: number; low_vulnerabilities: number; unknown_vulnerabilities: number;
   total_misconfigurations: number; total_exposed_secrets: number; workload_count?: number; affected_workloads?: number; affected_namespaces?: number; critical_workloads?: SecurityWorkload[]; high_risk_namespaces?: { namespace: string; average_score: number }[]; top_10_risks: SecurityWorkload[]; top_recommendations: string[];
   priority_issues?: SecurityIssue[]; total_unique_issues?: number; coverage?: Record<string, number>;
-  source_status?: { kubescape?: { installed: boolean; reports?: number; failed_controls: number; source?: string | null; error?: string | null }; falco?: { installed: boolean; alerts: number; pods?: number; error?: string | null; live_window_seconds?: number }; trivy?: { installed: boolean; reports: number; findings: number } };
+  source_status?: { falco?: { installed: boolean; alerts: number; pods?: number; error?: string | null; live_window_seconds?: number }; trivy?: { installed: boolean; reports: number; findings: number } };
   severity_counts?: Record<string, number>;
 }
 export interface InvestigationStep { name: string; status?: "running" | "completed" | string; completed: boolean; detail?: string; timestamp: string; }
