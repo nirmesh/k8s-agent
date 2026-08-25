@@ -9,7 +9,7 @@ from backend.evidence.security.fast_collector import FastSecurityEvidenceCollect
 
 
 class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
-    """Collect native Kubernetes, Trivy, Kubescape and Falco evidence.
+    """Collect native Kubernetes, Trivy and Falco evidence.
 
     Provider detections remain deterministic and evidence-grounded. The LLM is
     used only to explain and classify the operator-visible priority findings.
@@ -109,8 +109,7 @@ class LayeredSecurityEvidenceCollector(FastSecurityEvidenceCollector):
             "trivy_rows_aggregated": sum(i["occurrences"] for i in issues if i["source"] == "trivy-operator"),
             "mongo_evidence_cap": self._evidence_limit,
             "source_status": source_status,
-            "falco_alerts": source_status["falco"]["alerts"],
-            "kubescape_failed_controls": source_status["kubescape"]["failed_controls"],
+            "falco_alerts": source_status.get("falco", {}).get("alerts", 0),
             "llm_explanations": sum(1 for i in priority if i.get("explanation_source") == "llm"),
         }
         return {"evidence": self.evidence, "summary": summary, "diagnostics": diagnostics}
